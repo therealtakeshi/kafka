@@ -16,10 +16,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.kafka.clients.producer.Callback;
-import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.Record;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A batch of records that is or will be sent.
@@ -27,16 +28,23 @@ import org.apache.kafka.common.record.MemoryRecords;
  * This class is not thread safe and external synchronization must be used when modifying it
  */
 public final class RecordBatch {
+
+    private static final Logger log = LoggerFactory.getLogger(RecordBatch.class);
+
     public int recordCount = 0;
+    public int maxRecordSize = 0;
     public volatile int attempts = 0;
-    public final long created;
+    public final long createdMs;
+    public long drainedMs;
+    public long lastAttemptMs;
     public final MemoryRecords records;
     public final TopicPartition topicPartition;
     private final ProduceRequestResult produceFuture;
     private final List<Thunk> thunks;
 
     public RecordBatch(TopicPartition tp, MemoryRecords records, long now) {
-        this.created = now;
+        this.createdMs = now;
+        this.lastAttemptMs = now;
         this.records = records;
         this.topicPartition = tp;
         this.produceFuture = new ProduceRequestResult();
@@ -48,11 +56,12 @@ public final class RecordBatch {
      * 
      * @return The RecordSend corresponding to this record or null if there isn't sufficient room.
      */
-    public FutureRecordMetadata tryAppend(byte[] key, byte[] value, CompressionType compression, Callback callback) {
+    public FutureRecordMetadata tryAppend(byte[] key, byte[] value, Callback callback) {
         if (!this.records.hasRoomFor(key, value)) {
             return null;
         } else {
-            this.records.append(0L, key, value, compression);
+            this.records.append(0L, key, value);
+            this.maxRecordSize = Math.max(this.maxRecordSize, Record.recordSize(key, value));
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount);
             if (callback != null)
                 thunks.add(new Thunk(callback, future));
@@ -64,11 +73,15 @@ public final class RecordBatch {
     /**
      * Complete the request
      * 
-     * @param offset The offset
-     * @param errorCode The error code or 0 if no error
+     * @param baseOffset The base offset of the messages assigned by the server
+     * @param exception The exception that occurred (or null if the request was successful)
      */
-    public void done(long offset, RuntimeException exception) {
-        this.produceFuture.done(topicPartition, offset, exception);
+    public void done(long baseOffset, RuntimeException exception) {
+        this.produceFuture.done(topicPartition, baseOffset, exception);
+        log.trace("Produced messages to topic-partition {} with base offset offset {} and error: {}.",
+                  topicPartition,
+                  baseOffset,
+                  exception);
         // execute callbacks
         for (int i = 0; i < this.thunks.size(); i++) {
             try {
@@ -78,7 +91,7 @@ public final class RecordBatch {
                 else
                     thunk.callback.onCompletion(null, exception);
             } catch (Exception e) {
-                e.printStackTrace();
+                log.error("Error executing user-provided callback on message for topic-partition {}:", topicPartition, e);
             }
         }
     }
@@ -94,5 +107,10 @@ public final class RecordBatch {
             this.callback = callback;
             this.future = future;
         }
+    }
+
+    @Override
+    public String toString() {
+        return "RecordBatch(topicPartition=" + topicPartition + ", recordCount=" + recordCount + ")";
     }
 }

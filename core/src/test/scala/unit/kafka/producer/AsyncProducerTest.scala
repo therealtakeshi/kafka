@@ -84,15 +84,11 @@ class AsyncProducerTest extends JUnit3Suite {
 
   @Test
   def testProduceAfterClosed() {
-    val props = new Properties()
-    props.put("serializer.class", "kafka.serializer.StringEncoder")
-    props.put("metadata.broker.list", TestUtils.getBrokerListStrFromConfigs(configs))
-    props.put("producer.type", "async")
-    props.put("batch.num.messages", "1")
-
-    val config = new ProducerConfig(props)
     val produceData = getProduceData(10)
-    val producer = new Producer[String, String](config)
+    val producer = createProducer[String, String](
+      getBrokerListStrFromConfigs(configs),
+      encoder = classOf[StringEncoder].getName)
+
     producer.close
 
     try {
@@ -169,7 +165,7 @@ class AsyncProducerTest extends JUnit3Suite {
     props.put("metadata.broker.list", TestUtils.getBrokerListStrFromConfigs(configs))
     val broker1 = new Broker(0, "localhost", 9092)
     val broker2 = new Broker(1, "localhost", 9093)
-    broker1
+
     // form expected partitions metadata
     val partition1Metadata = new PartitionMetadata(0, Some(broker1), List(broker1, broker2))
     val partition2Metadata = new PartitionMetadata(1, Some(broker2), List(broker1, broker2))
@@ -303,10 +299,14 @@ class AsyncProducerTest extends JUnit3Suite {
   @Test
   def testIncompatibleEncoder() {
     val props = new Properties()
-    props.put("metadata.broker.list", TestUtils.getBrokerListStrFromConfigs(configs))
-    val config = new ProducerConfig(props)
+    // no need to retry since the send will always fail
+    props.put("message.send.max.retries", "0")
+    val producer= createProducer[String, String](
+      brokerList = getBrokerListStrFromConfigs(configs),
+      encoder = classOf[DefaultEncoder].getName,
+      keyEncoder = classOf[DefaultEncoder].getName,
+      producerProps = props)
 
-    val producer=new Producer[String, String](config)
     try {
       producer.send(getProduceData(1): _*)
       fail("Should fail with ClassCastException due to incompatible Encoder")
@@ -352,42 +352,6 @@ class AsyncProducerTest extends JUnit3Suite {
         }
       case None =>
         fail("Failed to collate requests by topic, partition")
-    }
-  }
-
-  @Test
-  def testBrokerListAndAsync() {
-    return
-    val props = TestUtils.getProducerConfig(TestUtils.getBrokerListStrFromConfigs(configs))
-    props.put("producer.type", "async")
-    props.put("batch.num.messages", "5")
-
-    val config = new ProducerConfig(props)
-
-    val topic = "topic1"
-    val topic1Metadata = getTopicMetadata(topic, 0, 0, "localhost", 9092)
-    val topicPartitionInfos = new collection.mutable.HashMap[String, TopicMetadata]
-    topicPartitionInfos.put("topic1", topic1Metadata)
-
-    val producerPool = new ProducerPool(config)
-
-    val msgs = TestUtils.getMsgStrings(10)
-
-    val handler = new DefaultEventHandler[String,String](config,
-                                                         partitioner = null.asInstanceOf[Partitioner],
-                                                         encoder = new StringEncoder,
-                                                         keyEncoder = new StringEncoder,
-                                                         producerPool = producerPool,
-                                                         topicPartitionInfos = topicPartitionInfos)
-
-    val producer = new Producer[String, String](config, handler)
-    try {
-      // send all 10 messages, should create 2 batches and 2 syncproducer calls
-      producer.send(msgs.map(m => new KeyedMessage[String,String](topic, m)): _*)
-      producer.close
-
-    } catch {
-      case e: Exception => fail("Not expected", e)
     }
   }
 

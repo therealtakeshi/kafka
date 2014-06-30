@@ -17,21 +17,20 @@
 
 package kafka.api.test
 
+import java.util.Properties
+import java.lang.{Integer, IllegalArgumentException}
+
+import org.apache.kafka.clients.producer._
+import org.scalatest.junit.JUnit3Suite
+import org.junit.Test
+import org.junit.Assert._
+
 import kafka.server.{KafkaConfig, KafkaServer}
 import kafka.utils.{Utils, TestUtils}
 import kafka.zk.ZooKeeperTestHarness
 import kafka.consumer.SimpleConsumer
 import kafka.api.FetchRequestBuilder
 import kafka.message.Message
-
-import org.apache.kafka.clients.producer._
-
-import org.scalatest.junit.JUnit3Suite
-import org.junit.Test
-import org.junit.Assert._
-
-import java.util.Properties
-import java.lang.{Integer, IllegalArgumentException}
 
 
 class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
@@ -46,8 +45,8 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
   private var consumer1: SimpleConsumer = null
   private var consumer2: SimpleConsumer = null
 
-  private val props1 = TestUtils.createBrokerConfig(brokerId1, port1)
-  private val props2 = TestUtils.createBrokerConfig(brokerId2, port2)
+  private val props1 = TestUtils.createBrokerConfig(brokerId1, port1, false)
+  private val props2 = TestUtils.createBrokerConfig(brokerId2, port2, false)
   props1.put("num.partitions", "4")
   props2.put("num.partitions", "4")
   private val config1 = new KafkaConfig(props1)
@@ -76,15 +75,10 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
     super.tearDown()
   }
 
-  class PrintOffsetCallback extends Callback {
+  class CheckErrorCallback extends Callback {
     def onCompletion(metadata: RecordMetadata, exception: Exception) {
       if (exception != null)
         fail("Send callback returns the following exception", exception)
-      try {
-        System.out.println("The message we just sent is marked as [" + metadata.partition + "] : " + metadata.offset);
-      } catch {
-        case e: Throwable => fail("Should succeed sending the message", e)
-      }
     }
   }
 
@@ -96,11 +90,9 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
    */
   @Test
   def testSendOffset() {
-    val props = new Properties()
-    props.put(ProducerConfig.BROKER_LIST_CONFIG, TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
-    var producer = new KafkaProducer(props)
+    var producer = TestUtils.createNewProducer(TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
 
-    val callback = new PrintOffsetCallback
+    val callback = new CheckErrorCallback
 
     try {
       // create topic
@@ -154,9 +146,7 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
    */
   @Test
   def testClose() {
-    val props = new Properties()
-    props.put(ProducerConfig.BROKER_LIST_CONFIG, TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
-    var producer = new KafkaProducer(props)
+    var producer = TestUtils.createNewProducer(TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
 
     try {
       // create topic
@@ -192,10 +182,7 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
    */
   @Test
   def testSendToPartition() {
-    val props = new Properties()
-    props.put(ProducerConfig.BROKER_LIST_CONFIG, TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
-    props.put(ProducerConfig.REQUIRED_ACKS_CONFIG, "-1")
-    var producer = new KafkaProducer(props)
+    var producer = TestUtils.createNewProducer(TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
 
     try {
       // create topic
@@ -250,9 +237,8 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
    */
   @Test
   def testAutoCreateTopic() {
-    val props = new Properties()
-    props.put(ProducerConfig.BROKER_LIST_CONFIG, TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)))
-    var producer = new KafkaProducer(props)
+    var producer = TestUtils.createNewProducer(TestUtils.getBrokerListStrFromConfigs(Seq(config1, config2)),
+                                            retries = 5)
 
     try {
       // Send a message to auto-create the topic
@@ -260,7 +246,7 @@ class ProducerSendTest extends JUnit3Suite with ZooKeeperTestHarness {
       assertEquals("Should have offset 0", 0L, producer.send(record).get.offset)
 
       // double check that the topic is created with leader elected
-      assertTrue("Topic should already be created with leader", TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 0).isDefined)
+      TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
 
     } finally {
       if (producer != null) {

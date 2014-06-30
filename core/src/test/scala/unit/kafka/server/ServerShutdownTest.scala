@@ -16,19 +16,20 @@
  */
 package kafka.server
 
-import java.io.File
-import kafka.consumer.SimpleConsumer
-import org.junit.Test
-import junit.framework.Assert._
-import kafka.message.ByteBufferMessageSet
-import org.scalatest.junit.JUnit3Suite
 import kafka.zk.ZooKeeperTestHarness
+import kafka.consumer.SimpleConsumer
 import kafka.producer._
-import kafka.utils.IntEncoder
+import kafka.utils.{IntEncoder, TestUtils, Utils}
 import kafka.utils.TestUtils._
-import kafka.admin.AdminUtils
 import kafka.api.FetchRequestBuilder
-import kafka.utils.{TestUtils, Utils}
+import kafka.message.ByteBufferMessageSet
+import kafka.serializer.StringEncoder
+
+import java.io.File
+
+import org.junit.Test
+import org.scalatest.junit.JUnit3Suite
+import junit.framework.Assert._
 
 class ServerShutdownTest extends JUnit3Suite with ZooKeeperTestHarness {
   val port = TestUtils.choosePort
@@ -44,13 +45,12 @@ class ServerShutdownTest extends JUnit3Suite with ZooKeeperTestHarness {
   def testCleanShutdown() {
     var server = new KafkaServer(config)
     server.startup()
-    val producerConfig = getProducerConfig(TestUtils.getBrokerListStrFromConfigs(Seq(config)))
-    producerConfig.put("key.serializer.class", classOf[IntEncoder].getName.toString)
-    var producer = new Producer[Int, String](new ProducerConfig(producerConfig))
+    var producer = TestUtils.createProducer[Int, String](TestUtils.getBrokerListStrFromConfigs(Seq(config)),
+      encoder = classOf[StringEncoder].getName,
+      keyEncoder = classOf[IntEncoder].getName)
 
     // create topic
-    AdminUtils.createTopic(zkClient, topic, 1, 1)
-    TestUtils.waitUntilMetadataIsPropagated(Seq(server), topic, 0, 1000)
+    createTopic(zkClient, topic, numPartitions = 1, replicationFactor = 1, servers = Seq(server))
 
     // send some messages
     producer.send(sent1.map(m => new KeyedMessage[Int, String](topic, 0, m)):_*)
@@ -69,9 +69,11 @@ class ServerShutdownTest extends JUnit3Suite with ZooKeeperTestHarness {
     server.startup()
 
     // wait for the broker to receive the update metadata request after startup
-    TestUtils.waitUntilMetadataIsPropagated(Seq(server), topic, 0, 1000)
+    TestUtils.waitUntilMetadataIsPropagated(Seq(server), topic, 0)
 
-    producer = new Producer[Int, String](new ProducerConfig(producerConfig))
+    producer = TestUtils.createProducer[Int, String](TestUtils.getBrokerListStrFromConfigs(Seq(config)),
+      encoder = classOf[StringEncoder].getName,
+      keyEncoder = classOf[IntEncoder].getName)
     val consumer = new SimpleConsumer(host, port, 1000000, 64*1024, "")
 
     var fetchedMessage: ByteBufferMessageSet = null
@@ -96,5 +98,25 @@ class ServerShutdownTest extends JUnit3Suite with ZooKeeperTestHarness {
     producer.close()
     server.shutdown()
     Utils.rm(server.config.logDirs)
+    verifyNonDaemonThreadsStatus
+  }
+
+  @Test
+  def testCleanShutdownWithDeleteTopicEnabled() {
+    val newProps = TestUtils.createBrokerConfig(0, port)
+    newProps.setProperty("delete.topic.enable", "true")
+    val newConfig = new KafkaConfig(newProps)
+    var server = new KafkaServer(newConfig)
+    server.startup()
+    server.shutdown()
+    server.awaitShutdown()
+    Utils.rm(server.config.logDirs)
+    verifyNonDaemonThreadsStatus
+  }
+
+  def verifyNonDaemonThreadsStatus() {
+    assertEquals(0, Thread.getAllStackTraces.keySet().toArray
+      .map(_.asInstanceOf[Thread])
+      .count(t => !t.isDaemon && t.isAlive && t.getClass.getCanonicalName.toLowerCase.startsWith("kafka")))
   }
 }

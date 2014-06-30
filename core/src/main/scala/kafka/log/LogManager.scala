@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 import kafka.utils._
 import scala.collection._
 import kafka.common.{TopicAndPartition, KafkaException}
-import kafka.server.OffsetCheckpoint
+import kafka.server.{RecoveringFromUncleanShutdown, BrokerState, OffsetCheckpoint}
 
 /**
  * The entry point to the kafka log management subsystem. The log manager is responsible for log creation, retrieval, and cleaning.
@@ -43,8 +43,8 @@ class LogManager(val logDirs: Array[File],
                  val flushCheckpointMs: Long,
                  val retentionCheckMs: Long,
                  scheduler: Scheduler,
+                 val brokerState: BrokerState,
                  private val time: Time) extends Logging {
-
   val RecoveryPointCheckpointFile = "recovery-point-offset-checkpoint"
   val LockFile = ".lock"
   val InitialTaskDelayMs = 30*1000
@@ -52,7 +52,7 @@ class LogManager(val logDirs: Array[File],
   private val logs = new Pool[TopicAndPartition, Log]()
 
   createAndValidateLogDirs(logDirs)
-  private var dirLocks = lockLogDirs(logDirs)
+  private val dirLocks = lockLogDirs(logDirs)
   private val recoveryPointCheckpoints = logDirs.map(dir => (dir, new OffsetCheckpoint(new File(dir, RecoveryPointCheckpointFile)))).toMap
   loadLogs(logDirs)
   
@@ -110,6 +110,9 @@ class LogManager(val logDirs: Array[File],
         val cleanShutDownFile = new File(dir, Log.CleanShutdownFile)
         if(cleanShutDownFile.exists())
           info("Found clean shutdown file. Skipping recovery for all logs in data directory '%s'".format(dir.getAbsolutePath))
+        else
+          brokerState.newState(RecoveringFromUncleanShutdown)
+
         for(dir <- subDirs) {
           if(dir.isDirectory) {
             info("Loading log '" + dir.getName + "'")
@@ -162,7 +165,7 @@ class LogManager(val logDirs: Array[File],
    * Close all the logs
    */
   def shutdown() {
-    debug("Shutting down.")
+    info("Shutting down.")
     try {
       // stop the cleaner first
       if(cleaner != null)
@@ -179,7 +182,7 @@ class LogManager(val logDirs: Array[File],
       // regardless of whether the close succeeded, we need to unlock the data directories
       dirLocks.foreach(_.destroy())
     }
-    debug("Shutdown complete.")
+    info("Shutdown complete.")
   }
 
   /**
@@ -351,7 +354,7 @@ class LogManager(val logDirs: Array[File],
     debug("Beginning log cleanup...")
     var total = 0
     val startMs = time.milliseconds
-    for(log <- allLogs; if !log.config.dedupe) {
+    for(log <- allLogs; if !log.config.compact) {
       debug("Garbage collecting '" + log.name + "'")
       total += cleanupExpiredSegments(log) + cleanupSegmentsToMaintainSize(log)
     }

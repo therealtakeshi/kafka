@@ -17,18 +17,17 @@
 
 package kafka.javaapi
 
-import kafka.common.{TopicAndPartition, OffsetMetadataAndError}
-import collection.JavaConversions
-import java.nio.ByteBuffer
+import kafka.common.{OffsetAndMetadata, TopicAndPartition}
 
 class OffsetCommitRequest(groupId: String,
-                          requestInfo: java.util.Map[TopicAndPartition, OffsetMetadataAndError],
+                          requestInfo: java.util.Map[TopicAndPartition, OffsetAndMetadata],
                           versionId: Short,
                           correlationId: Int,
                           clientId: String) {
   val underlying = {
-    val scalaMap: Map[TopicAndPartition, OffsetMetadataAndError] = {
-      import JavaConversions._
+    val scalaMap: collection.immutable.Map[TopicAndPartition, OffsetAndMetadata] = {
+      import collection.JavaConversions._
+
       requestInfo.toMap
     }
     kafka.api.OffsetCommitRequest(

@@ -1,4 +1,3 @@
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -6,7 +5,7 @@
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
  * the License.  You may obtain a copy of the License at
- * 
+ *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
@@ -25,13 +24,13 @@ import scala.collection._
 import org.scalatest.junit.JUnit3Suite
 import kafka.message._
 import kafka.serializer._
-import kafka.admin.AdminUtils
 import org.I0Itec.zkclient.ZkClient
 import kafka.utils._
 import kafka.producer.{ProducerConfig, KeyedMessage, Producer}
 import java.util.{Collections, Properties}
 import org.apache.log4j.{Logger, Level}
 import kafka.utils.TestUtils._
+import kafka.common.MessageStreamsExistException
 
 class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHarness with Logging {
 
@@ -94,11 +93,11 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
                         sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages)
 
     // wait to make sure the topic and partition have a leader for the successful case
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0, 1000)
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1, 1000)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1)
 
     // create a consumer
     val consumerConfig1 = new ConsumerConfig(TestUtils.createConsumerProperties(zkConnect, group, consumer1))
@@ -115,7 +114,7 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     assertEquals(expected_1, actual_1)
 
     // commit consumed offsets
-    zkConsumerConnector1.commitOffsets
+    zkConsumerConnector1.commitOffsets()
 
     // create a consumer
     val consumerConfig2 = new ConsumerConfig(TestUtils.createConsumerProperties(zkConnect, group, consumer2)) {
@@ -127,8 +126,8 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages2 = sendMessagesToBrokerPartition(configs.head, topic, 0, nMessages) ++
                         sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages)
 
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
     val receivedMessages2 = getMessages(nMessages, topicMessageStreams1) ++ getMessages(nMessages, topicMessageStreams2)
     assertEquals(sentMessages2.sorted, receivedMessages2.sorted)
@@ -148,8 +147,8 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages3 = sendMessagesToBrokerPartition(configs.head, topic, 0, nMessages) ++
                         sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages)
 
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
     val receivedMessages3 = getMessages(nMessages, topicMessageStreams1) ++ getMessages(nMessages, topicMessageStreams2)
     assertEquals(sentMessages3.sorted, receivedMessages3.sorted)
@@ -158,12 +157,21 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val actual_3 = getZKChildrenValues(dirs.consumerOwnerDir)
     assertEquals(expected_2, actual_3)
 
+    // call createMesssageStreams twice should throw MessageStreamsExistException
+    try {
+      val topicMessageStreams4 = zkConsumerConnector3.createMessageStreams(new mutable.HashMap[String, Int]())
+      fail("Should fail with MessageStreamsExistException")
+    } catch {
+      case e: MessageStreamsExistException => // expected
+    }
+
     zkConsumerConnector1.shutdown
     zkConsumerConnector2.shutdown
     zkConsumerConnector3.shutdown
     info("all consumer connectors stopped")
     requestHandlerLogger.setLevel(Level.ERROR)
   }
+
 
   def testCompression() {
     val requestHandlerLogger = Logger.getLogger(classOf[kafka.server.KafkaRequestHandler])
@@ -173,11 +181,11 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages1 = sendMessagesToBrokerPartition(configs.head, topic, 0, nMessages, GZIPCompressionCodec) ++
                         sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages, GZIPCompressionCodec)
 
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0, 1000)
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1, 1000)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1)
 
     // create a consumer
     val consumerConfig1 = new ConsumerConfig(
@@ -194,7 +202,7 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     assertEquals(expected_1, actual_1)
 
     // commit consumed offsets
-    zkConsumerConnector1.commitOffsets
+    zkConsumerConnector1.commitOffsets()
 
     // create a consumer
     val consumerConfig2 = new ConsumerConfig(TestUtils.createConsumerProperties(zkConnect, group, consumer2)) {
@@ -206,8 +214,8 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages2 = sendMessagesToBrokerPartition(configs.head, topic, 0, nMessages, GZIPCompressionCodec) ++
                         sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages, GZIPCompressionCodec)
 
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
     val receivedMessages2 = getMessages(nMessages, topicMessageStreams1) ++ getMessages(nMessages, topicMessageStreams2)
     assertEquals(sentMessages2.sorted, receivedMessages2.sorted)
@@ -227,8 +235,8 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages3 = sendMessagesToBrokerPartition(configs.head, topic, 0, nMessages, GZIPCompressionCodec) ++
                         sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages, GZIPCompressionCodec)
 
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
     val receivedMessages3 = getMessages(nMessages, topicMessageStreams1) ++ getMessages(nMessages, topicMessageStreams2)
     assertEquals(sentMessages3.sorted, receivedMessages3.sorted)
@@ -249,8 +257,8 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages = sendMessagesToBrokerPartition(configs.head, topic, 0, 200, DefaultCompressionCodec) ++
                        sendMessagesToBrokerPartition(configs.last, topic, 1, 200, DefaultCompressionCodec)
 
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0, 1000)
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1, 1000)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1)
 
     val consumerConfig1 = new ConsumerConfig(TestUtils.createConsumerProperties(zkConnect, group, consumer0))
     val zkConsumerConnector1 = new ZookeeperConsumerConnector(consumerConfig1, true)
@@ -275,13 +283,13 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val sentMessages = sendMessagesToBrokerPartition(configs.head, topic, 0, nMessages, NoCompressionCodec) ++
                        sendMessagesToBrokerPartition(configs.last, topic, 1, nMessages, NoCompressionCodec)
 
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0, 1000)
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1, 1000)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0)
+    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 1)
 
     val consumerConfig = new ConsumerConfig(TestUtils.createConsumerProperties(zkConnect, group, consumer1))
 
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1, 500)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0)
+    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 1)
 
     val zkConsumerConnector =
       new ZookeeperConsumerConnector(consumerConfig, true)
@@ -310,12 +318,10 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     val zkClient = new ZkClient(zookeeperConnect, 6000, 30000, ZKStringSerializer)
 
     // create topic topic1 with 1 partition on broker 0
-    AdminUtils.createTopic(zkClient, topic, 1, 1)
+    createTopic(zkClient, topic, numPartitions = 1, replicationFactor = 1, servers = servers)
 
     // send some messages to each broker
     val sentMessages1 = sendMessages(configs.head, nMessages, "batch1", NoCompressionCodec, 1)
-
-    TestUtils.waitUntilMetadataIsPropagated(servers, topic, 0, 1000)
 
     // create a consumer
     val consumerConfig1 = new ConsumerConfig(TestUtils.createConsumerProperties(zkConnect, group, consumer1))
@@ -346,12 +352,14 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
                                     compression: CompressionCodec = NoCompressionCodec): List[String] = {
     val header = "test-%d-%d".format(config.brokerId, partition)
     val props = new Properties()
-    props.put("metadata.broker.list", TestUtils.getBrokerListStrFromConfigs(configs))
-    props.put("partitioner.class", "kafka.utils.FixedValuePartitioner")
     props.put("compression.codec", compression.codec.toString)
-    props.put("key.serializer.class", classOf[IntEncoder].getName.toString)
-    props.put("serializer.class", classOf[StringEncoder].getName.toString)
-    val producer: Producer[Int, String] = new Producer[Int, String](new ProducerConfig(props))
+    val producer: Producer[Int, String] =
+      createProducer(TestUtils.getBrokerListStrFromConfigs(configs),
+                     encoder = classOf[StringEncoder].getName,
+                     keyEncoder = classOf[IntEncoder].getName,
+                     partitioner = classOf[FixedValuePartitioner].getName,
+                     producerProps = props)
+
     val ms = 0.until(numMessages).map(x => header + config.brokerId + "-" + partition + "-" + x)
     producer.send(ms.map(m => new KeyedMessage[Int, String](topic, partition, m)):_*)
     debug("Sent %d messages to broker %d for partition [%s,%d]".format(ms.size, config.brokerId, topic, partition))
@@ -359,18 +367,21 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     ms.toList
   }
 
-  def sendMessages(config: KafkaConfig, 
-                   messagesPerNode: Int, 
-                   header: String, 
-                   compression: CompressionCodec, 
+  def sendMessages(config: KafkaConfig,
+                   messagesPerNode: Int,
+                   header: String,
+                   compression: CompressionCodec,
                    numParts: Int): List[String]= {
     var messages: List[String] = Nil
     val props = new Properties()
-    props.put("metadata.broker.list", TestUtils.getBrokerListStrFromConfigs(configs))
-    props.put("partitioner.class", "kafka.utils.FixedValuePartitioner")
-    props.put("key.serializer.class", classOf[IntEncoder].getName.toString)
-    props.put("serializer.class", classOf[StringEncoder].getName)
-    val producer: Producer[Int, String] = new Producer[Int, String](new ProducerConfig(props))
+    props.put("compression.codec", compression.codec.toString)
+    val producer: Producer[Int, String] =
+      createProducer(brokerList = TestUtils.getBrokerListStrFromConfigs(configs),
+                     encoder = classOf[StringEncoder].getName,
+                     keyEncoder = classOf[IntEncoder].getName,
+                     partitioner = classOf[FixedValuePartitioner].getName,
+                     producerProps = props)
+
     for (partition <- 0 until numParts) {
       val ms = 0.until(messagesPerNode).map(x => header + config.brokerId + "-" + partition + "-" + x)
       producer.send(ms.map(m => new KeyedMessage[Int, String](topic, partition, m)):_*)
@@ -381,14 +392,7 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
     messages
   }
 
-  def sendMessages(messagesPerNode: Int, header: String, compression: CompressionCodec = NoCompressionCodec): List[String]= {
-    var messages: List[String] = Nil
-    for(conf <- configs)
-      messages ++= sendMessages(conf, messagesPerNode, header, compression, numParts)
-    messages
-  }
-
-  def getMessages(nMessagesPerThread: Int, 
+  def getMessages(nMessagesPerThread: Int,
                   topicMessageStreams: Map[String,List[KafkaStream[String, String]]]): List[String]= {
     var messages: List[String] = Nil
     for((topic, messageStreams) <- topicMessageStreams) {
@@ -417,5 +421,3 @@ class ZookeeperConsumerConnectorTest extends JUnit3Suite with KafkaServerTestHar
   }
 
 }
-
-

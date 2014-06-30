@@ -71,7 +71,7 @@ class SimpleConsumer(val host: String,
         response = blockingChannel.receive()
       } catch {
         case e : Throwable =>
-          warn("Reconnect due to socket error: %s".format(e.getMessage))
+          info("Reconnect due to socket error: %s".format(e.getMessage))
           // retry once
           try {
             reconnect()
@@ -90,6 +90,11 @@ class SimpleConsumer(val host: String,
   def send(request: TopicMetadataRequest): TopicMetadataResponse = {
     val response = sendRequest(request)
     TopicMetadataResponse.readFrom(response.buffer)
+  }
+
+  def send(request: ConsumerMetadataRequest): ConsumerMetadataResponse = {
+    val response = sendRequest(request)
+    ConsumerMetadataResponse.readFrom(response.buffer)
   }
 
   /**
@@ -126,7 +131,11 @@ class SimpleConsumer(val host: String,
    * @param request a [[kafka.api.OffsetCommitRequest]] object.
    * @return a [[kafka.api.OffsetCommitResponse]] object.
    */
-  def commitOffsets(request: OffsetCommitRequest) = OffsetCommitResponse.readFrom(sendRequest(request).buffer)
+  def commitOffsets(request: OffsetCommitRequest) = {
+    // TODO: With KAFKA-1012, we have to first issue a ConsumerMetadataRequest and connect to the coordinator before
+    // we can commit offsets.
+    OffsetCommitResponse.readFrom(sendRequest(request).buffer)
+  }
 
   /**
    * Fetch offsets for a topic

@@ -7,6 +7,16 @@ See our [web site](http://kafka.apache.org) for details on the project.
 
 Follow instuctions in http://kafka.apache.org/documentation.html#quickstart
 
+### Building source jar ###
+    ./gradlew srcJar
+
+### Building javadocs and scaladocs ###
+    ./gradlew javadoc
+    ./gradlew javadocJar # builds a jar from the javadocs
+    ./gradlew scaladoc
+    ./gradlew scaladocJar # builds a jar from the scaladocs
+    ./gradlew docsJar # builds both javadoc and scaladoc jar
+
 ### Running unit tests ###
     ./gradlew test
 
@@ -16,17 +26,23 @@ Follow instuctions in http://kafka.apache.org/documentation.html#quickstart
 ### Running a particular unit test ###
     ./gradlew -Dtest.single=RequestResponseSerializationTest core:test
 
+### Running a particular unit test with log4j output ###
+    change the log4j setting in either clients/src/test/resources/log4j.properties or core/src/test/resources/log4j.properties
+    ./gradlew -i -Dtest.single=RequestResponseSerializationTest core:test
+
 ### Building a binary release gzipped tar ball ###
     ./gradlew clean
     ./gradlew releaseTarGz  
+    The above command will fail if you haven't set up the signing key. To bypass signing the artifact, you can run
+    ./gradlew releaseTarGz -x signArchives
 
 The release file can be found inside ./core/build/distributions/.
 
 ### Cleaning the build ###
     ./gradlew clean
 
-### Running a task on a particular version of Scala ####
-either 2.8.0, 2.8.2, 2.9.1, 2.9.2 or 2.10.1) (If building a jar with a version other than 2.8.0, the scala version variable in bin/kafka-run-class.sh needs to be changed to run quick start.)
+### Running a task on a particular version of Scala (either 2.8.0, 2.8.2, 2.9.1, 2.9.2 or 2.10.1) ###
+#### (If building a jar with a version other than 2.8.0, the scala version variable in bin/kafka-run-class.sh needs to be changed to run quick start.) ####
     ./gradlew -PscalaVersion=2.9.1 jar
     ./gradlew -PscalaVersion=2.9.1 test
     ./gradlew -PscalaVersion=2.9.1 releaseTarGz

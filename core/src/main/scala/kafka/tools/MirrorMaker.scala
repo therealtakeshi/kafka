@@ -17,23 +17,28 @@
 
 package kafka.tools
 
-import joptsimple.OptionParser
-import kafka.utils.{Utils, CommandLineUtils, Logging}
-import kafka.producer.{KeyedMessage, ProducerConfig, Producer}
-import scala.collection.JavaConversions._
-import java.util.concurrent.CountDownLatch
-import java.nio.ByteBuffer
+import kafka.utils.{SystemTime, Utils, CommandLineUtils, Logging}
 import kafka.consumer._
 import kafka.serializer._
-import collection.mutable.ListBuffer
-import kafka.tools.KafkaMigrationTool.{ProducerThread, ProducerDataChannel}
-import kafka.javaapi
+import kafka.producer.{OldProducer, NewShinyProducer, BaseProducer}
+import org.apache.kafka.clients.producer.ProducerRecord
+
+import scala.collection.mutable.ListBuffer
+import scala.collection.JavaConversions._
+
+import java.util.concurrent.{TimeUnit, BlockingQueue, ArrayBlockingQueue, CountDownLatch}
+
+import joptsimple.OptionParser
+import kafka.metrics.KafkaMetricsGroup
+import com.yammer.metrics.core.Gauge
 
 object MirrorMaker extends Logging {
 
   private var connectors: Seq[ZookeeperConsumerConnector] = null
-  private var consumerThreads: Seq[MirrorMakerThread] = null
+  private var consumerThreads: Seq[ConsumerThread] = null
   private var producerThreads: ListBuffer[ProducerThread] = null
+
+  private val shutdownMessage : ProducerRecord = new ProducerRecord("shutdown", "shutdown".getBytes)
 
   def main(args: Array[String]) {
     
@@ -53,6 +58,9 @@ object MirrorMaker extends Logging {
       .describedAs("config file")
       .ofType(classOf[String])
 
+    val useNewProducerOpt = parser.accepts("new.producer",
+      "Use the new producer implementation.")
+
     val numProducersOpt = parser.accepts("num.producers",
       "Number of producer instances")
       .withRequiredArg()
@@ -67,11 +75,12 @@ object MirrorMaker extends Logging {
       .ofType(classOf[java.lang.Integer])
       .defaultsTo(1)
 
-    val bufferSizeOpt =  parser.accepts("queue.size", "Number of messages that are buffered between the consumer and producer")
+    val bufferSizeOpt =  parser.accepts("queue.size",
+      "Number of messages that are buffered between the consumer and producer")
       .withRequiredArg()
       .describedAs("Queue size in terms of number of messages")
       .ofType(classOf[java.lang.Integer])
-      .defaultsTo(10000);
+      .defaultsTo(10000)
 
     val whitelistOpt = parser.accepts("whitelist",
       "Whitelist of topics to mirror.")
@@ -86,6 +95,9 @@ object MirrorMaker extends Logging {
             .ofType(classOf[String])
 
     val helpOpt = parser.accepts("help", "Print this message.")
+    
+    if(args.length == 0)
+      CommandLineUtils.printUsageAndDie(parser, "Continuously copy data between two Kafka clusters.")
 
     val options = parser.parse(args : _*)
 
@@ -100,25 +112,39 @@ object MirrorMaker extends Logging {
       System.exit(1)
     }
 
-    val numStreams = options.valueOf(numStreamsOpt)
+    val numProducers = options.valueOf(numProducersOpt).intValue()
+    val numStreams = options.valueOf(numStreamsOpt).intValue()
     val bufferSize = options.valueOf(bufferSizeOpt).intValue()
 
-    val producers = (1 to options.valueOf(numProducersOpt).intValue()).map(_ => {
-      val props = Utils.loadProps(options.valueOf(producerConfigOpt))
-      val config = props.getProperty("partitioner.class") match {
-        case null =>
-          new ProducerConfig(props) {
-            override val partitionerClass = "kafka.producer.ByteArrayPartitioner"
-          }
-        case pClass : String =>
-          new ProducerConfig(props)
-      }
-      new Producer[Array[Byte], Array[Byte]](config)
+    val useNewProducer = options.has(useNewProducerOpt)
+    val producerProps = Utils.loadProps(options.valueOf(producerConfigOpt))
+
+    // create producer threads
+    val clientId = producerProps.getProperty("client.id", "")
+    val producers = (1 to numProducers).map(i => {
+      producerProps.setProperty("client.id", clientId + "-" + i)
+      if (useNewProducer)
+        new NewShinyProducer(producerProps)
+      else
+        new OldProducer(producerProps)
     })
 
+    // create consumer streams
     connectors = options.valuesOf(consumerConfigOpt).toList
-            .map(cfg => new ConsumerConfig(Utils.loadProps(cfg.toString)))
-            .map(new ZookeeperConsumerConnector(_))
+      .map(cfg => new ConsumerConfig(Utils.loadProps(cfg)))
+      .map(new ZookeeperConsumerConnector(_))
+    val numConsumers = connectors.size * numStreams
+
+    // create a data channel btw the consumers and the producers
+    val mirrorDataChannel = new DataChannel(bufferSize, numConsumers, numProducers)
+
+    producerThreads = new ListBuffer[ProducerThread]()
+    var producerIndex: Int = 1
+    for(producer <- producers) {
+      val producerThread = new ProducerThread(mirrorDataChannel, producer, producerIndex)
+      producerThreads += producerThread
+      producerIndex += 1
+    }
 
     val filterSpec = if (options.has(whitelistOpt))
       new Whitelist(options.valueOf(whitelistOpt))
@@ -127,18 +153,14 @@ object MirrorMaker extends Logging {
 
     var streams: Seq[KafkaStream[Array[Byte], Array[Byte]]] = Nil
     try {
-      streams = connectors.map(_.createMessageStreamsByFilter(filterSpec, numStreams.intValue(), new DefaultDecoder(), new DefaultDecoder())).flatten
+      streams = connectors.map(_.createMessageStreamsByFilter(filterSpec, numStreams, new DefaultDecoder(), new DefaultDecoder())).flatten
     } catch {
       case t: Throwable =>
         fatal("Unable to create stream - shutting down mirror maker.")
         connectors.foreach(_.shutdown)
     }
-
-    val producerDataChannel = new ProducerDataChannel[KeyedMessage[Array[Byte], Array[Byte]]](bufferSize);
-
-    consumerThreads = streams.zipWithIndex.map(streamAndIndex => new MirrorMakerThread(streamAndIndex._1, producerDataChannel, producers, streamAndIndex._2))
-
-    producerThreads = new ListBuffer[ProducerThread]()
+    consumerThreads = streams.zipWithIndex.map(streamAndIndex => new ConsumerThread(streamAndIndex._1, mirrorDataChannel, producers, streamAndIndex._2))
+    assert(consumerThreads.size == numConsumers)
 
     Runtime.getRuntime.addShutdownHook(new Thread() {
       override def run() {
@@ -146,21 +168,14 @@ object MirrorMaker extends Logging {
       }
     })
 
-    // create producer threads
-    var i: Int = 1
-    for(producer <- producers) {
-      val producerThread: KafkaMigrationTool.ProducerThread = new KafkaMigrationTool.ProducerThread(producerDataChannel,
-        new javaapi.producer.Producer[Array[Byte], Array[Byte]](producer), i)
-      producerThreads += producerThread
-      i += 1
-    }
-
     consumerThreads.foreach(_.start)
     producerThreads.foreach(_.start)
 
-    // in case the consumer threads hit a timeout/other exception
-    consumerThreads.foreach(_.awaitShutdown)
-    cleanShutdown()
+    // we wait on producer's shutdown latch instead of consumers
+    // since the consumer threads can hit a timeout/other exception;
+    // but in this case the producer should still be able to shutdown
+    // based on the shutdown message in the channel
+    producerThreads.foreach(_.awaitShutdown)
   }
 
   def cleanShutdown() {
@@ -173,34 +188,71 @@ object MirrorMaker extends Logging {
     info("Kafka mirror maker shutdown successfully")
   }
 
-  class MirrorMakerThread(stream: KafkaStream[Array[Byte], Array[Byte]],
-                          producerDataChannel: ProducerDataChannel[KeyedMessage[Array[Byte], Array[Byte]]],
-                          producers: Seq[Producer[Array[Byte], Array[Byte]]],
-                          threadId: Int)
-          extends Thread with Logging {
+  class DataChannel(capacity: Int, numProducers: Int, numConsumers: Int) extends KafkaMetricsGroup {
+
+    val queue = new ArrayBlockingQueue[ProducerRecord](capacity)
+
+    newGauge(
+      "MirrorMaker-DataChannel-Size",
+      new Gauge[Int] {
+        def value = queue.size
+      }
+    )
+
+    // We use a single meter for aggregated wait percentage for the data channel.
+    // Since meter is calculated as total_recorded_value / time_window and
+    // time_window is independent of the number of threads, each recorded wait
+    // time should be discounted by # threads.
+    private val waitPut = newMeter("MirrorMaker-DataChannel-WaitOnPut", "percent", TimeUnit.NANOSECONDS)
+    private val waitTake = newMeter("MirrorMaker-DataChannel-WaitOnTake", "percent", TimeUnit.NANOSECONDS)
+
+    def put(record: ProducerRecord) {
+      var putSucceed = false
+      while (!putSucceed) {
+        val startPutTime = SystemTime.nanoseconds
+        putSucceed = queue.offer(record, 500, TimeUnit.MILLISECONDS)
+        waitPut.mark((SystemTime.nanoseconds - startPutTime) / numProducers)
+      }
+    }
+
+    def take(): ProducerRecord = {
+      var data: ProducerRecord = null
+      while (data == null) {
+        val startTakeTime = SystemTime.nanoseconds
+        data = queue.poll(500, TimeUnit.MILLISECONDS)
+        waitTake.mark((SystemTime.nanoseconds - startTakeTime) / numConsumers)
+      }
+      data
+    }
+  }
+
+  class ConsumerThread(stream: KafkaStream[Array[Byte], Array[Byte]],
+                       mirrorDataChannel: DataChannel,
+                       producers: Seq[BaseProducer],
+                       threadId: Int)
+          extends Thread with Logging with KafkaMetricsGroup {
 
     private val shutdownLatch = new CountDownLatch(1)
-    private val threadName = "mirrormaker-" + threadId
+    private val threadName = "mirrormaker-consumer-" + threadId
     this.logIdent = "[%s] ".format(threadName)
 
     this.setName(threadName)
 
     override def run() {
-      info("Starting mirror maker thread " + threadName)
+      info("Starting mirror maker consumer thread " + threadName)
       try {
         for (msgAndMetadata <- stream) {
           // If the key of the message is empty, put it into the universal channel
           // Otherwise use a pre-assigned producer to send the message
           if (msgAndMetadata.key == null) {
             trace("Send the non-keyed message the producer channel.")
-            val pd = new KeyedMessage[Array[Byte], Array[Byte]](msgAndMetadata.topic, msgAndMetadata.message)
-            producerDataChannel.sendRequest(pd)
+            val data = new ProducerRecord(msgAndMetadata.topic, msgAndMetadata.message)
+            mirrorDataChannel.put(data)
           } else {
             val producerId = Utils.abs(java.util.Arrays.hashCode(msgAndMetadata.key)) % producers.size()
             trace("Send message with key %s to producer %d.".format(java.util.Arrays.toString(msgAndMetadata.key), producerId))
             val producer = producers(producerId)
-            val pd = new KeyedMessage[Array[Byte], Array[Byte]](msgAndMetadata.topic, msgAndMetadata.key, msgAndMetadata.message)
-            producer.send(pd)
+            producer.send(msgAndMetadata.topic, msgAndMetadata.key, msgAndMetadata.message)
           }
         }
       } catch {
@@ -208,15 +260,72 @@ object MirrorMaker extends Logging {
           fatal("Stream unexpectedly exited.", e)
       } finally {
         shutdownLatch.countDown()
-        info("Stopped thread.")
+        info("Consumer thread stopped")
       }
     }
 
     def awaitShutdown() {
       try {
         shutdownLatch.await()
+        info("Consumer thread shutdown complete")
       } catch {
-        case e: InterruptedException => fatal("Shutdown of thread %s interrupted. This might leak data!".format(threadName))
+        case e: InterruptedException => fatal("Shutdown of the consumer thread interrupted. This might leak data!")
+      }
+    }
+  }
+
+  class ProducerThread (val dataChannel: DataChannel,
+                        val producer: BaseProducer,
+                        val threadId: Int) extends Thread with Logging with KafkaMetricsGroup {
+    private val threadName = "mirrormaker-producer-" + threadId
+    private val shutdownComplete: CountDownLatch = new CountDownLatch(1)
+    this.logIdent = "[%s] ".format(threadName)
+
+    setName(threadName)
+
+    override def run {
+      info("Starting mirror maker producer thread " + threadName)
+      try {
+        while (true) {
+          val data: ProducerRecord = dataChannel.take
+          trace("Sending message with value size %d".format(data.value().size))
+          if(data eq shutdownMessage) {
+            info("Received shutdown message")
+            return
+          }
+          producer.send(data.topic(), data.key(), data.value())
+        }
+      } catch {
+        case t: Throwable => {
+          fatal("Producer thread failure due to ", t)
+        }
+      } finally {
+        shutdownComplete.countDown
+        info("Producer thread stopped")
+      }
+    }
+
+    def shutdown {
+      try {
+        info("Producer thread " + threadName + " shutting down")
+        dataChannel.put(shutdownMessage)
+      }
+      catch {
+        case ie: InterruptedException => {
+          warn("Interrupt during shutdown of ProducerThread")
+        }
+      }
+    }
+
+    def awaitShutdown {
+      try {
+        shutdownComplete.await
+        producer.close
+        info("Producer thread shutdown complete")
+      } catch {
+        case ie: InterruptedException => {
+          warn("Shutdown of the producer thread interrupted")
+        }
       }
     }
   }

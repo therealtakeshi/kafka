@@ -16,13 +16,18 @@
  */
 package org.apache.kafka.clients.producer.internals;
 
+import org.apache.kafka.clients.producer.BufferExhaustedException;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.metrics.stats.Rate;
+import org.apache.kafka.common.utils.Time;
+
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
-
-import org.apache.kafka.clients.producer.BufferExhaustedException;
 
 
 /**
@@ -44,6 +49,9 @@ public final class BufferPool {
     private final Deque<ByteBuffer> free;
     private final Deque<Condition> waiters;
     private long availableMemory;
+    private final Metrics metrics;
+    private final Time time;
+    private final Sensor waitTime;
 
     /**
      * Create a new buffer pool
@@ -54,7 +62,7 @@ public final class BufferPool {
      *        {@link #allocate(int)} call will block and wait for memory to be returned to the pool. If false
      *        {@link #allocate(int)} will throw an exception if the buffer is out of memory.
      */
-    public BufferPool(long memory, int poolableSize, boolean blockOnExhaustion) {
+    public BufferPool(long memory, int poolableSize, boolean blockOnExhaustion, Metrics metrics, Time time) {
         this.poolableSize = poolableSize;
         this.blockOnExhaustion = blockOnExhaustion;
         this.lock = new ReentrantLock();
@@ -62,15 +70,22 @@ public final class BufferPool {
         this.waiters = new ArrayDeque<Condition>();
         this.totalMemory = memory;
         this.availableMemory = memory;
-    }
+        this.metrics = metrics;
+        this.time = time;
+        this.waitTime = this.metrics.sensor("bufferpool-wait-time");
+        this.waitTime.add("bufferpool-wait-ratio",
+                          "The fraction of time an appender waits for space allocation.",
+                          new Rate(TimeUnit.NANOSECONDS));
+   }
 
     /**
-     * Allocate a buffer of the given size
+     * Allocate a buffer of the given size. This method blocks if there is not enough memory and the buffer pool
+     * is configured with blocking mode.
      * 
      * @param size The buffer size to allocate in bytes
      * @return The buffer
      * @throws InterruptedException If the thread is interrupted while blocked
-     * @throws IllegalArgument if size is larger than the total memory controlled by the pool (and hence we would block
+     * @throws IllegalArgumentException if size is larger than the total memory controlled by the pool (and hence we would block
      *         forever)
      * @throws BufferExhaustedException if the pool is in non-blocking mode and size exceeds the free memory in the pool
      */
@@ -110,7 +125,14 @@ public final class BufferPool {
                 // loop over and over until we have a buffer or have reserved
                 // enough memory to allocate one
                 while (accumulated < size) {
-                    moreMemory.await();
+                    try {
+                        long startWait = time.nanoseconds();
+                        moreMemory.await(300, TimeUnit.MILLISECONDS);
+                        long endWait = time.nanoseconds();
+                        this.waitTime.record(endWait - startWait, time.milliseconds());
+                     } catch (InterruptedException e) {
+                        // This should never happen. Just let it go.
+                    }
                     // check if we can satisfy this request from the free list,
                     // otherwise allocate memory
                     if (accumulated == 0 && size == this.poolableSize && !this.free.isEmpty()) {
@@ -166,26 +188,29 @@ public final class BufferPool {
      * Return buffers to the pool. If they are of the poolable size add them to the free list, otherwise just mark the
      * memory as free.
      * 
-     * @param buffers The buffers to return
+     * @param buffer The buffer to return
+     * @param size The size of the buffer to mark as deallocated, note that this maybe smaller than buffer.capacity
+     *             since the buffer may re-allocate itself during in-place compression
      */
-    public void deallocate(ByteBuffer... buffers) {
+    public void deallocate(ByteBuffer buffer, int size) {
         lock.lock();
         try {
-            for (int i = 0; i < buffers.length; i++) {
-                int size = buffers[i].capacity();
-                if (size == this.poolableSize) {
-                    buffers[i].clear();
-                    this.free.add(buffers[i]);
-                } else {
-                    this.availableMemory += size;
-                }
-                Condition moreMem = this.waiters.peekFirst();
-                if (moreMem != null)
-                    moreMem.signal();
+            if (size == this.poolableSize && size == buffer.capacity()) {
+                buffer.clear();
+                this.free.add(buffer);
+            } else {
+                this.availableMemory += size;
             }
+            Condition moreMem = this.waiters.peekFirst();
+            if (moreMem != null)
+                moreMem.signal();
         } finally {
             lock.unlock();
         }
+    }
+
+    public void deallocate(ByteBuffer buffer) {
+        deallocate(buffer, buffer.capacity());
     }
 
     /**

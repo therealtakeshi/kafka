@@ -25,7 +25,6 @@ import java.util.concurrent.locks.Lock
 import java.lang.management._
 import javax.management._
 import scala.collection._
-import mutable.ListBuffer
 import scala.collection.mutable
 import java.util.Properties
 import kafka.common.KafkaException
@@ -140,12 +139,18 @@ object Utils extends Logging {
    * Read a properties file from the given path
    * @param filename The path of the file to read
    */
-  def loadProps(filename: String): Properties = {
-    val propStream = new FileInputStream(filename)
-    val props = new Properties()
-    props.load(propStream)
-    props
-  }
+   def loadProps(filename: String): Properties = {
+     val props = new Properties()
+     var propStream: InputStream = null
+     try {
+       propStream = new FileInputStream(filename)
+       props.load(propStream)
+     } finally {
+       if(propStream != null)
+         propStream.close
+     }
+     props
+   }
 
   /**
    * Open a channel for the given file
@@ -475,7 +480,7 @@ object Utils extends Logging {
    * Get the absolute value of the given number. If the number is Int.MinValue return 0.
    * This is different from java.lang.Math.abs or scala.math.abs in that they return Int.MinValue (!).
    */
-  def abs(n: Int) = n & 0x7fffffff
+  def abs(n: Int) = if(n == Integer.MIN_VALUE) 0 else math.abs(n)
 
   /**
    * Replace the given string suffix with the new suffix. If the string doesn't end with the given suffix throw an exception.
@@ -540,5 +545,4 @@ object Utils extends Logging {
       lock.unlock()
     }
   }
-  
 }

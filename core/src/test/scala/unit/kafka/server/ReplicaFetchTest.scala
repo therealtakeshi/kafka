@@ -22,13 +22,12 @@ import kafka.zk.ZooKeeperTestHarness
 import kafka.utils.TestUtils._
 import kafka.producer.KeyedMessage
 import kafka.serializer.StringEncoder
-import kafka.admin.AdminUtils
 import kafka.utils.TestUtils
 import junit.framework.Assert._
 import kafka.common._
 
 class ReplicaFetchTest extends JUnit3Suite with ZooKeeperTestHarness  {
-  val props = createBrokerConfigs(2)
+  val props = createBrokerConfigs(2,false)
   val configs = props.map(p => new KafkaConfig(p))
   var brokers: Seq[KafkaServer] = null
   val topic1 = "foo"
@@ -51,14 +50,13 @@ class ReplicaFetchTest extends JUnit3Suite with ZooKeeperTestHarness  {
 
     // create a topic and partition and await leadership
     for (topic <- List(topic1,topic2)) {
-      AdminUtils.createTopic(zkClient, topic, 1, 2)
-      TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 1000)
+      createTopic(zkClient, topic, numPartitions = 1, replicationFactor = 2, servers = brokers)
     }
 
     // send test messages to leader
-    val producer = TestUtils.createProducer[String, String](TestUtils.getBrokerListStrFromConfigs(configs), 
-                                                            new StringEncoder(), 
-                                                            new StringEncoder())
+    val producer = TestUtils.createProducer[String, String](TestUtils.getBrokerListStrFromConfigs(configs),
+                                                            encoder = classOf[StringEncoder].getName,
+                                                            keyEncoder = classOf[StringEncoder].getName)
     val messages = testMessageList1.map(m => new KeyedMessage(topic1, m, m)) ++ testMessageList2.map(m => new KeyedMessage(topic2, m, m))
     producer.send(messages:_*)
     producer.close()
@@ -73,6 +71,6 @@ class ReplicaFetchTest extends JUnit3Suite with ZooKeeperTestHarness  {
       }
       result
     }
-    assertTrue("Broker logs should be identical", waitUntilTrue(logsMatch, 6000))
+    waitUntilTrue(logsMatch, "Broker logs should be identical")
   }
 }

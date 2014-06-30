@@ -114,18 +114,19 @@ class SocketServerTest extends JUnitSuite {
 
     val request = server.requestChannel.receiveRequest
     // Since the response is not sent yet, the selection key should not be readable.
-    Assert.assertFalse((request.requestKey.asInstanceOf[SelectionKey].interestOps & SelectionKey.OP_READ) == SelectionKey.OP_READ)
+    TestUtils.waitUntilTrue(
+      () => { (request.requestKey.asInstanceOf[SelectionKey].interestOps & SelectionKey.OP_READ) != SelectionKey.OP_READ },
+      "Socket key shouldn't be available for read")
 
     server.requestChannel.sendResponse(new RequestChannel.Response(0, request, null))
 
     // After the response is sent to the client (which is async and may take a bit of time), the socket key should be available for reads.
-    Assert.assertTrue(
-      TestUtils.waitUntilTrue(
-        () => { (request.requestKey.asInstanceOf[SelectionKey].interestOps & SelectionKey.OP_READ) == SelectionKey.OP_READ },
-        5000))
+    TestUtils.waitUntilTrue(
+      () => { (request.requestKey.asInstanceOf[SelectionKey].interestOps & SelectionKey.OP_READ) == SelectionKey.OP_READ },
+      "Socket key should be available for reads")
   }
 
-  @Test(expected = classOf[SocketException])
+  @Test(expected = classOf[IOException])
   def testSocketsCloseOnShutdown() {
     // open a connection and then shutdown the server
     val socket = connect()

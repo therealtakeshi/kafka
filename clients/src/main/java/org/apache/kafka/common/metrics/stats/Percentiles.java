@@ -1,18 +1,14 @@
 /**
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE
+ * file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file
+ * to You under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the
+ * License. You may obtain a copy of the License at
+ * 
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
  */
 package org.apache.kafka.common.metrics.stats;
 
@@ -25,7 +21,6 @@ import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.stats.Histogram.BinScheme;
 import org.apache.kafka.common.metrics.stats.Histogram.ConstantBinScheme;
 import org.apache.kafka.common.metrics.stats.Histogram.LinearBinScheme;
-
 
 /**
  * A compound stat that reports one or more percentiles
@@ -74,7 +69,7 @@ public class Percentiles extends SampledStat implements CompoundStat {
     }
 
     public double value(MetricConfig config, long now, double quantile) {
-        timeoutObsoleteSamples(config, now);
+        purgeObsoleteSamples(config, now);
         float count = 0.0f;
         for (Sample sample : this.samples)
             count += sample.eventCount;
@@ -99,12 +94,12 @@ public class Percentiles extends SampledStat implements CompoundStat {
     }
 
     @Override
-    protected HistogramSample newSample(long now) {
-        return new HistogramSample(this.binScheme, now);
+    protected HistogramSample newSample(long timeMs) {
+        return new HistogramSample(this.binScheme, timeMs);
     }
 
     @Override
-    protected void update(Sample sample, MetricConfig config, double value, long now) {
+    protected void update(Sample sample, MetricConfig config, double value, long timeMs) {
         HistogramSample hist = (HistogramSample) sample;
         hist.histogram.record(value);
     }

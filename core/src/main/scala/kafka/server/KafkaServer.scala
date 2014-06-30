@@ -31,20 +31,24 @@ import kafka.cluster.Broker
 import kafka.api.{ControlledShutdownResponse, ControlledShutdownRequest}
 import kafka.common.ErrorMapping
 import kafka.network.{Receive, BlockingChannel, SocketServer}
+import kafka.metrics.KafkaMetricsGroup
+import com.yammer.metrics.core.Gauge
 
 /**
  * Represents the lifecycle of a single Kafka broker. Handles all functionality required
  * to start up and shutdown a single Kafka node.
  */
-class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logging {
+class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logging with KafkaMetricsGroup {
   this.logIdent = "[Kafka Server " + config.brokerId + "], "
   private var isShuttingDown = new AtomicBoolean(false)
   private var shutdownLatch = new CountDownLatch(1)
-  private var startupComplete = new AtomicBoolean(false);
+  private var startupComplete = new AtomicBoolean(false)
+  val brokerState: BrokerState = new BrokerState
   val correlationId: AtomicInteger = new AtomicInteger(0)
   var socketServer: SocketServer = null
   var requestHandlerPool: KafkaRequestHandlerPool = null
   var logManager: LogManager = null
+  var offsetManager: OffsetManager = null
   var kafkaHealthcheck: KafkaHealthcheck = null
   var topicConfigManager: TopicConfigManager = null
   var replicaManager: ReplicaManager = null
@@ -53,12 +57,20 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
   val kafkaScheduler = new KafkaScheduler(config.backgroundThreads)
   var zkClient: ZkClient = null
 
+  newGauge(
+    "BrokerState",
+    new Gauge[Int] {
+      def value = brokerState.currentState
+    }
+  )
+
   /**
    * Start up API for bringing up a single instance of the Kafka server.
    * Instantiates the LogManager, the SocketServer and the request handlers - KafkaRequestHandlers
    */
   def startup() {
     info("starting")
+    brokerState.newState(Starting)
     isShuttingDown = new AtomicBoolean(false)
     shutdownLatch = new CountDownLatch(1)
 
@@ -69,7 +81,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
     zkClient = initZk()
 
     /* start log manager */
-    logManager = createLogManager(zkClient)
+    logManager = createLogManager(zkClient, brokerState)
     logManager.startup()
 
     socketServer = new SocketServer(config.brokerId,
@@ -83,11 +95,16 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
     socketServer.startup()
 
     replicaManager = new ReplicaManager(config, time, zkClient, kafkaScheduler, logManager, isShuttingDown)
-    kafkaController = new KafkaController(config, zkClient)
+
+    /* start offset manager */
+    offsetManager = createOffsetManager()
+
+    kafkaController = new KafkaController(config, zkClient, brokerState)
     
     /* start processing requests */
-    apis = new KafkaApis(socketServer.requestChannel, replicaManager, zkClient, config.brokerId, config, kafkaController)
+    apis = new KafkaApis(socketServer.requestChannel, replicaManager, offsetManager, zkClient, config.brokerId, config, kafkaController)
     requestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.requestChannel, apis, config.numIoThreads)
+    brokerState.newState(RunningAsBroker)
    
     Mx4jLoader.maybeLoad()
 
@@ -104,7 +121,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
 
     
     registerStats()
-    startupComplete.set(true);
+    startupComplete.set(true)
     info("started")
   }
   
@@ -138,6 +155,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
       var prevController : Broker = null
       var shutdownSuceeded : Boolean = false
       try {
+        brokerState.newState(PendingControlledShutdown)
         while (!shutdownSuceeded && remainingRetries > 0) {
           remainingRetries = remainingRetries - 1
 
@@ -172,7 +190,9 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
               // send the controlled shutdown request
               val request = new ControlledShutdownRequest(correlationId.getAndIncrement, config.brokerId)
               channel.send(request)
+
               response = channel.receive()
+
               val shutdownResponse = ControlledShutdownResponse.readFrom(response.buffer)
               if (shutdownResponse.errorCode == ErrorMapping.NoError && shutdownResponse.partitionsRemaining != null &&
                   shutdownResponse.partitionsRemaining.size == 0) {
@@ -215,15 +235,18 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
    */
   def shutdown() {
     info("shutting down")
-    val canShutdown = isShuttingDown.compareAndSet(false, true);
+    val canShutdown = isShuttingDown.compareAndSet(false, true)
     if (canShutdown) {
       Utils.swallow(controlledShutdown())
+      brokerState.newState(BrokerShuttingDown)
       if(kafkaHealthcheck != null)
         Utils.swallow(kafkaHealthcheck.shutdown())
       if(socketServer != null)
         Utils.swallow(socketServer.shutdown())
       if(requestHandlerPool != null)
         Utils.swallow(requestHandlerPool.shutdown())
+      if(offsetManager != null)
+        offsetManager.shutdown()
       Utils.swallow(kafkaScheduler.shutdown())
       if(apis != null)
         Utils.swallow(apis.close())
@@ -236,8 +259,9 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
       if(zkClient != null)
         Utils.swallow(zkClient.close())
 
+      brokerState.newState(NotRunning)
       shutdownLatch.countDown()
-      startupComplete.set(false);
+      startupComplete.set(false)
       info("shut down completed")
     }
   }
@@ -249,7 +273,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
 
   def getLogManager(): LogManager = logManager
   
-  private def createLogManager(zkClient: ZkClient): LogManager = {
+  private def createLogManager(zkClient: ZkClient, brokerState: BrokerState): LogManager = {
     val defaultLogConfig = LogConfig(segmentSize = config.logSegmentBytes, 
                                      segmentMs = 60L * 60L * 1000L * config.logRollHours,
                                      flushInterval = config.logFlushIntervalMessages,
@@ -262,7 +286,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
                                      deleteRetentionMs = config.logCleanerDeleteRetentionMs,
                                      fileDeleteDelayMs = config.logDeleteDelayMs,
                                      minCleanableRatio = config.logCleanerMinCleanRatio,
-                                     dedupe = config.logCleanupPolicy.trim.toLowerCase == "dedupe")
+                                     compact = config.logCleanupPolicy.trim.toLowerCase == "compact")
     val defaultProps = defaultLogConfig.toProps
     val configs = AdminUtils.fetchAllTopicConfigs(zkClient).mapValues(LogConfig.fromProps(defaultProps, _))
     // read the log configurations from zookeeper
@@ -282,9 +306,21 @@ class KafkaServer(val config: KafkaConfig, time: Time = SystemTime) extends Logg
                    flushCheckpointMs = config.logFlushOffsetCheckpointIntervalMs,
                    retentionCheckMs = config.logCleanupIntervalMs,
                    scheduler = kafkaScheduler,
+                   brokerState = brokerState,
                    time = time)
   }
 
-}
+  private def createOffsetManager(): OffsetManager = {
+    val offsetManagerConfig = OffsetManagerConfig(
+      maxMetadataSize = config.offsetMetadataMaxSize,
+      loadBufferSize = config.offsetsLoadBufferSize,
+      offsetsRetentionMs = config.offsetsRetentionMinutes * 60 * 1000L,
+      offsetsTopicNumPartitions = config.offsetsTopicPartitions,
+      offsetsTopicReplicationFactor = config.offsetsTopicReplicationFactor,
+      offsetCommitTimeoutMs = config.offsetCommitTimeoutMs,
+      offsetCommitRequiredAcks = config.offsetCommitRequiredAcks)
+    new OffsetManager(offsetManagerConfig, replicaManager, zkClient, kafkaScheduler)
+  }
 
+}
 

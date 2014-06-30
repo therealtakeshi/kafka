@@ -170,11 +170,6 @@ class MigrationToolTest(ReplicationUtils, SetupUtils):
                 self.anonLogger.info("sleeping for 5s")
                 time.sleep(5)
 
-                self.log_message("creating topics")
-                kafka_system_test_utils.create_topic(self.systemTestEnv, self.testcaseEnv)
-                self.anonLogger.info("sleeping for 5s")
-                time.sleep(5)
-
                 # =============================================
                 # starting producer 
                 # =============================================
@@ -247,6 +242,7 @@ class MigrationToolTest(ReplicationUtils, SetupUtils):
                         str(self.testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"]) + "]", extra=self.d)
                     if self.testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"]:
                         time.sleep(1)
+                        self.testcaseEnv.lock.release()
                         self.logger.info("all producer threads completed", extra=self.d)
                         break
                     time.sleep(1)

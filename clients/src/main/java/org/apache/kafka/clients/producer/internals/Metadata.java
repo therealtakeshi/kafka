@@ -19,6 +19,8 @@ import java.util.Set;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A class encapsulating some of the logic around metadata.
@@ -30,9 +32,11 @@ import org.apache.kafka.common.errors.TimeoutException;
  */
 public final class Metadata {
 
+    private static final Logger log = LoggerFactory.getLogger(Metadata.class);
+
     private final long refreshBackoffMs;
     private final long metadataExpireMs;
-    private long lastRefresh;
+    private long lastRefreshMs;
     private Cluster cluster;
     private boolean forceUpdate;
     private final Set<String> topics;
@@ -53,7 +57,7 @@ public final class Metadata {
     public Metadata(long refreshBackoffMs, long metadataExpireMs) {
         this.refreshBackoffMs = refreshBackoffMs;
         this.metadataExpireMs = metadataExpireMs;
-        this.lastRefresh = 0L;
+        this.lastRefreshMs = 0L;
         this.cluster = Cluster.empty();
         this.forceUpdate = false;
         this.topics = new HashSet<String>();
@@ -75,18 +79,21 @@ public final class Metadata {
     public synchronized Cluster fetch(String topic, long maxWaitMs) {
         List<PartitionInfo> partitions = null;
         long begin = System.currentTimeMillis();
+        long remainingWaitMs = maxWaitMs;
         do {
-            partitions = cluster.partitionsFor(topic);
+            partitions = cluster.partitionsForTopic(topic);
             if (partitions == null) {
                 topics.add(topic);
                 forceUpdate = true;
                 try {
-                    wait(maxWaitMs);
+                    log.trace("Requesting metadata update for topic {}.", topic);
+                    wait(remainingWaitMs);
                 } catch (InterruptedException e) { /* this is fine, just try again */
                 }
-                long ellapsed = System.currentTimeMillis() - begin;
-                if (ellapsed >= maxWaitMs)
+                long elapsed = System.currentTimeMillis() - begin;
+                if (elapsed >= maxWaitMs)
                     throw new TimeoutException("Failed to update metadata after " + maxWaitMs + " ms.");
+                remainingWaitMs = maxWaitMs - elapsed;
             } else {
                 return cluster;
             }
@@ -99,7 +106,7 @@ public final class Metadata {
      * than metadataExpireMs has passed since the last refresh)
      */
     public synchronized boolean needsUpdate(long now) {
-        long msSinceLastUpdate = now - this.lastRefresh;
+        long msSinceLastUpdate = now - this.lastRefreshMs;
         boolean updateAllowed = msSinceLastUpdate >= this.refreshBackoffMs;
         boolean updateNeeded = this.forceUpdate || msSinceLastUpdate >= this.metadataExpireMs;
         return updateAllowed && updateNeeded;
@@ -124,16 +131,17 @@ public final class Metadata {
      */
     public synchronized void update(Cluster cluster, long now) {
         this.forceUpdate = false;
-        this.lastRefresh = now;
+        this.lastRefreshMs = now;
         this.cluster = cluster;
         notifyAll();
+        log.debug("Updated cluster metadata to {}", cluster);
     }
 
     /**
      * The last time metadata was updated.
      */
     public synchronized long lastUpdate() {
-        return this.lastRefresh;
+        return this.lastRefreshMs;
     }
 
 }

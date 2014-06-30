@@ -30,7 +30,6 @@ import kafka.serializer._
 import kafka.producer.{KeyedMessage, Producer}
 import kafka.utils.TestUtils._
 import kafka.utils.TestUtils
-import kafka.admin.AdminUtils
 
 class FetcherTest extends JUnit3Suite with KafkaServerTestHarness {
 
@@ -55,8 +54,8 @@ class FetcherTest extends JUnit3Suite with KafkaServerTestHarness {
 
   override def setUp() {
     super.setUp
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0 -> Seq(configs.head.brokerId)))
-    waitUntilLeaderIsElectedOrChanged(zkClient, topic, 0, 500)
+    createTopic(zkClient, topic, partitionReplicaAssignment = Map(0 -> Seq(configs.head.brokerId)), servers = servers)
+
     fetcher = new ConsumerFetcherManager("consumer1", new ConsumerConfig(TestUtils.createConsumerProperties("", "", "")), zkClient)
     fetcher.stopConnections()
     fetcher.startConnections(topicInfos, cluster)
@@ -83,9 +82,9 @@ class FetcherTest extends JUnit3Suite with KafkaServerTestHarness {
   def sendMessages(messagesPerNode: Int): Int = {
     var count = 0
     for(conf <- configs) {
-      val producer: Producer[String, Array[Byte]] = TestUtils.createProducer(TestUtils.getBrokerListStrFromConfigs(configs),
-                                                                             new DefaultEncoder(),
-                                                                             new StringEncoder())
+      val producer: Producer[String, Array[Byte]] = TestUtils.createProducer(
+        TestUtils.getBrokerListStrFromConfigs(configs),
+        keyEncoder = classOf[StringEncoder].getName)
       val ms = 0.until(messagesPerNode).map(x => (conf.brokerId * 5 + x).toString.getBytes).toArray
       messages += conf.brokerId -> ms
       producer.send(ms.map(m => new KeyedMessage[String, Array[Byte]](topic, topic, m)):_*)

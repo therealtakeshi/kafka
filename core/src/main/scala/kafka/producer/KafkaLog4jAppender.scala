@@ -23,74 +23,53 @@ import org.apache.log4j.AppenderSkeleton
 import org.apache.log4j.helpers.LogLog
 import kafka.utils.Logging
 import java.util.{Properties, Date}
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 
 class KafkaLog4jAppender extends AppenderSkeleton with Logging {
-  var topic:String = null
-  var serializerClass:String = null
-  var brokerList:String = null
-  var producerType:String = null
-  var compressionCodec:String = null
-  var enqueueTimeout:String = null
-  var queueSize:String = null
+  var topic: String = null
+  var brokerList: String = null
+  var compressionType: String = null
   var requiredNumAcks: Int = Int.MaxValue
+  var syncSend: Boolean = false
 
-  private var producer: Producer[String, String] = null
+  private var producer: KafkaProducer = null
 
-  def getTopic:String = topic
+  def getTopic: String = topic
   def setTopic(topic: String) { this.topic = topic }
 
-  def getBrokerList:String = brokerList
+  def getBrokerList: String = brokerList
   def setBrokerList(brokerList: String) { this.brokerList = brokerList }
 
-  def getSerializerClass:String = serializerClass
-  def setSerializerClass(serializerClass:String) { this.serializerClass = serializerClass }
+  def getCompressionType: String = compressionType
+  def setCompressionType(compressionType: String) { this.compressionType = compressionType }
 
-  def getProducerType:String = producerType
-  def setProducerType(producerType:String) { this.producerType = producerType }
+  def getRequiredNumAcks: Int = requiredNumAcks
+  def setRequiredNumAcks(requiredNumAcks: Int) { this.requiredNumAcks = requiredNumAcks }
 
-  def getCompressionCodec:String = compressionCodec
-  def setCompressionCodec(compressionCodec:String) { this.compressionCodec = compressionCodec }
-
-  def getEnqueueTimeout:String = enqueueTimeout
-  def setEnqueueTimeout(enqueueTimeout:String) { this.enqueueTimeout = enqueueTimeout }
-
-  def getQueueSize:String = queueSize
-  def setQueueSize(queueSize:String) { this.queueSize = queueSize }
-
-  def getRequiredNumAcks:Int = requiredNumAcks
-  def setRequiredNumAcks(requiredNumAcks:Int) { this.requiredNumAcks = requiredNumAcks }
+  def getSyncSend: Boolean = syncSend
+  def setSyncSend(syncSend: Boolean) { this.syncSend = syncSend }
 
   override def activateOptions() {
     // check for config parameter validity
     val props = new Properties()
     if(brokerList != null)
-      props.put("metadata.broker.list", brokerList)
+      props.put(org.apache.kafka.clients.producer.ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList)
     if(props.isEmpty)
-      throw new MissingConfigException("The metadata.broker.list property should be specified")
+      throw new MissingConfigException("The bootstrap servers property should be specified")
     if(topic == null)
       throw new MissingConfigException("topic must be specified by the Kafka log4j appender")
-    if(serializerClass == null) {
-      serializerClass = "kafka.serializer.StringEncoder"
-      LogLog.debug("Using default encoder - kafka.serializer.StringEncoder")
-    }
-    props.put("serializer.class", serializerClass)
-    //These have default values in ProducerConfig and AsyncProducerConfig. We don't care if they're not specified
-    if(producerType != null) props.put("producer.type", producerType)
-    if(compressionCodec != null) props.put("compression.codec", compressionCodec)
-    if(enqueueTimeout != null) props.put("queue.enqueue.timeout.ms", enqueueTimeout)
-    if(queueSize != null) props.put("queue.buffering.max.messages", queueSize)
-    if(requiredNumAcks != Int.MaxValue) props.put("request.required.acks", requiredNumAcks.toString)
-    val config : ProducerConfig = new ProducerConfig(props)
-    producer = new Producer[String, String](config)
-    LogLog.debug("Kafka producer connected to " +  config.brokerList)
+    if(compressionType != null) props.put(org.apache.kafka.clients.producer.ProducerConfig.COMPRESSION_TYPE_CONFIG, compressionType)
+    if(requiredNumAcks != Int.MaxValue) props.put(org.apache.kafka.clients.producer.ProducerConfig.ACKS_CONFIG, requiredNumAcks.toString)
+    producer = new KafkaProducer(props)
+    LogLog.debug("Kafka producer connected to " +  brokerList)
     LogLog.debug("Logging for topic: " + topic)
   }
 
   override def append(event: LoggingEvent)  {
     val message = subAppend(event)
     LogLog.debug("[" + new Date(event.getTimeStamp).toString + "]" + message)
-    val messageData = new KeyedMessage[String, String](topic, message)
-    producer.send(messageData);
+    val response = producer.send(new ProducerRecord(topic, message.getBytes()))
+    if (syncSend) response.get
   }
 
   def subAppend(event: LoggingEvent): String = {

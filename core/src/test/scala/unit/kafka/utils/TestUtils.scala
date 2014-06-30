@@ -23,8 +23,6 @@ import java.nio._
 import java.nio.channels._
 import java.util.Random
 import java.util.Properties
-import java.util.concurrent.locks.ReentrantLock
-import java.util.concurrent.TimeUnit
 
 import collection.mutable.Map
 import collection.mutable.ListBuffer
@@ -44,12 +42,13 @@ import kafka.producer.ProducerConfig
 
 import junit.framework.AssertionFailedError
 import junit.framework.Assert._
+import org.apache.kafka.clients.producer.KafkaProducer
 
 /**
  * Utility functions to help with testing
  */
 object TestUtils extends Logging {
-  
+
   val IoTmpDir = System.getProperty("java.io.tmpdir")
 
   val Letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -88,6 +87,18 @@ object TestUtils extends Logging {
     f
   }
 
+  def tempTopic(): String = "testTopic" + random.nextInt(1000000)
+
+  /**
+   * Create a temporary relative directory
+   */
+  def tempRelativeDir(parent: String): File = {
+    val f = new File(parent, "kafka-" + random.nextInt(1000000))
+    f.mkdirs()
+    f.deleteOnExit()
+    f
+  }
+
   /**
    * Create a temporary file
    */
@@ -116,9 +127,10 @@ object TestUtils extends Logging {
   /**
    * Create a test config for the given node id
    */
-  def createBrokerConfigs(numConfigs: Int): List[Properties] = {
+  def createBrokerConfigs(numConfigs: Int,
+    enableControlledShutdown: Boolean = true): List[Properties] = {
     for((port, node) <- choosePorts(numConfigs).zipWithIndex)
-    yield createBrokerConfig(node, port)
+    yield createBrokerConfig(node, port, enableControlledShutdown)
   }
 
   def getBrokerListStrFromConfigs(configs: Seq[KafkaConfig]): String = {
@@ -128,7 +140,8 @@ object TestUtils extends Logging {
   /**
    * Create a test config for the given node id
    */
-  def createBrokerConfig(nodeId: Int, port: Int = choosePort()): Properties = {
+  def createBrokerConfig(nodeId: Int, port: Int = choosePort(),
+    enableControlledShutdown: Boolean = true): Properties = {
     val props = new Properties
     props.put("broker.id", nodeId.toString)
     props.put("host.name", "localhost")
@@ -136,20 +149,39 @@ object TestUtils extends Logging {
     props.put("log.dir", TestUtils.tempDir().getAbsolutePath)
     props.put("zookeeper.connect", TestZKUtils.zookeeperConnect)
     props.put("replica.socket.timeout.ms", "1500")
+    props.put("controlled.shutdown.enable", enableControlledShutdown.toString)
     props
   }
 
   /**
-   * Create a topic in zookeeper
+   * Create a topic in zookeeper.
+   * Wait until the leader is elected and the metadata is propagated to all brokers.
+   * Return the leader for each partition.
    */
   def createTopic(zkClient: ZkClient, topic: String, numPartitions: Int = 1, replicationFactor: Int = 1,
-                  servers: List[KafkaServer]) : scala.collection.immutable.Map[Int, Option[Int]] = {
+                  servers: Seq[KafkaServer]) : scala.collection.immutable.Map[Int, Option[Int]] = {
     // create topic
     AdminUtils.createTopic(zkClient, topic, numPartitions, replicationFactor)
     // wait until the update metadata request for new topic reaches all servers
     (0 until numPartitions).map { case i =>
-      TestUtils.waitUntilMetadataIsPropagated(servers, topic, i, 500)
-      i -> TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, i, 500)
+      TestUtils.waitUntilMetadataIsPropagated(servers, topic, i)
+      i -> TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, i)
+    }.toMap
+  }
+
+  /**
+   * Create a topic in zookeeper using a customized replica assignment.
+   * Wait until the leader is elected and the metadata is propagated to all brokers.
+   * Return the leader for each partition.
+   */
+  def createTopic(zkClient: ZkClient, topic: String, partitionReplicaAssignment: collection.Map[Int, Seq[Int]],
+                  servers: Seq[KafkaServer]) : scala.collection.immutable.Map[Int, Option[Int]] = {
+    // create topic
+    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, partitionReplicaAssignment)
+    // wait until the update metadata request for new topic reaches all servers
+    partitionReplicaAssignment.keySet.map { case i =>
+      TestUtils.waitUntilMetadataIsPropagated(servers, topic, i)
+      i -> TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic, i)
     }.toMap
   }
 
@@ -163,7 +195,7 @@ object TestUtils extends Logging {
     props.put("group.id", groupId)
     props.put("consumer.id", consumerId)
     props.put("consumer.timeout.ms", consumerTimeout.toString)
-    props.put("zookeeper.session.timeout.ms", "400")
+    props.put("zookeeper.session.timeout.ms", "6000")
     props.put("zookeeper.sync.time.ms", "200")
     props.put("auto.commit.interval.ms", "1000")
     props.put("rebalance.max.retries", "4")
@@ -308,30 +340,62 @@ object TestUtils extends Logging {
   }
 
   /**
-   * Create a producer for the given host and port
+   * Create a producer with a few pre-configured properties.
+   * If certain properties need to be overridden, they can be provided in producerProps.
    */
-  def createProducer[K, V](brokerList: String, 
-                           encoder: Encoder[V] = new DefaultEncoder(), 
-                           keyEncoder: Encoder[K] = new DefaultEncoder()): Producer[K, V] = {
-    val props = new Properties()
-    props.put("metadata.broker.list", brokerList)
-    props.put("send.buffer.bytes", "65536")
-    props.put("connect.timeout.ms", "100000")
-    props.put("reconnect.interval", "10000")
-    props.put("serializer.class", encoder.getClass.getCanonicalName)
-    props.put("key.serializer.class", keyEncoder.getClass.getCanonicalName)
+  def createProducer[K, V](brokerList: String,
+                           encoder: String = classOf[DefaultEncoder].getName,
+                           keyEncoder: String = classOf[DefaultEncoder].getName,
+                           partitioner: String = classOf[DefaultPartitioner].getName,
+                           producerProps: Properties = null): Producer[K, V] = {
+    val props: Properties = getProducerConfig(brokerList)
+
+    //override any explicitly specified properties
+    if (producerProps != null)
+      props.putAll(producerProps)
+
+    props.put("serializer.class", encoder)
+    props.put("key.serializer.class", keyEncoder)
+    props.put("partitioner.class", partitioner)
     new Producer[K, V](new ProducerConfig(props))
   }
 
-  def getProducerConfig(brokerList: String, partitioner: String = "kafka.producer.DefaultPartitioner"): Properties = {
+  /**
+   * Create a (new) producer with a few pre-configured properties.
+   */
+  def createNewProducer(brokerList: String,
+                        acks: Int = -1,
+                        metadataFetchTimeout: Long = 3000L,
+                        blockOnBufferFull: Boolean = true,
+                        bufferSize: Long = 1024L * 1024L,
+                        retries: Int = 0) : KafkaProducer = {
+    import org.apache.kafka.clients.producer.ProducerConfig
+
+    val producerProps = new Properties()
+    producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList)
+    producerProps.put(ProducerConfig.ACKS_CONFIG, acks.toString)
+    producerProps.put(ProducerConfig.METADATA_FETCH_TIMEOUT_CONFIG, metadataFetchTimeout.toString)
+    producerProps.put(ProducerConfig.BLOCK_ON_BUFFER_FULL_CONFIG, blockOnBufferFull.toString)
+    producerProps.put(ProducerConfig.BUFFER_MEMORY_CONFIG, bufferSize.toString)
+    producerProps.put(ProducerConfig.RETRIES_CONFIG, retries.toString)
+    producerProps.put(ProducerConfig.RETRY_BACKOFF_MS_CONFIG, "1000")
+    producerProps.put(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG, "200")
+    return new KafkaProducer(producerProps)
+  }
+
+  /**
+   * Create a default producer config properties map with the given metadata broker list
+   */
+  def getProducerConfig(brokerList: String): Properties = {
     val props = new Properties()
     props.put("metadata.broker.list", brokerList)
-    props.put("partitioner.class", partitioner)
-    props.put("message.send.max.retries", "3")
+    props.put("message.send.max.retries", "5")
     props.put("retry.backoff.ms", "1000")
-    props.put("request.timeout.ms", "500")
+    props.put("request.timeout.ms", "2000")
     props.put("request.required.acks", "-1")
-    props.put("serializer.class", classOf[StringEncoder].getName.toString)
+    props.put("send.buffer.bytes", "65536")
+    props.put("connect.timeout.ms", "100000")
+    props.put("reconnect.interval", "10000")
 
     props
   }
@@ -342,7 +406,7 @@ object TestUtils extends Logging {
     props.put("port", port.toString)
     props.put("request.timeout.ms", "500")
     props.put("request.required.acks", "1")
-    props.put("serializer.class", classOf[StringEncoder].getName.toString)
+    props.put("serializer.class", classOf[StringEncoder].getName)
     props
   }
 
@@ -385,9 +449,9 @@ object TestUtils extends Logging {
   /**
    * Create a wired format request based on simple basic information
    */
-  def produceRequest(topic: String, 
-                     partition: Int, 
-                     message: ByteBufferMessageSet, 
+  def produceRequest(topic: String,
+                     partition: Int,
+                     message: ByteBufferMessageSet,
                      acks: Int = SyncProducerConfig.DefaultRequiredAcks,
                      timeout: Int = SyncProducerConfig.DefaultAckTimeoutMs,
                      correlationId: Int = 0,
@@ -395,10 +459,10 @@ object TestUtils extends Logging {
     produceRequestWithAcks(Seq(topic), Seq(partition), message, acks, timeout, correlationId, clientId)
   }
 
-  def produceRequestWithAcks(topics: Seq[String], 
-                             partitions: Seq[Int], 
-                             message: ByteBufferMessageSet, 
-                             acks: Int = SyncProducerConfig.DefaultRequiredAcks, 
+  def produceRequestWithAcks(topics: Seq[String],
+                             partitions: Seq[Int],
+                             message: ByteBufferMessageSet,
+                             acks: Int = SyncProducerConfig.DefaultRequiredAcks,
                              timeout: Int = SyncProducerConfig.DefaultAckTimeoutMs,
                              correlationId: Int = 0,
                              clientId: String = SyncProducerConfig.DefaultClientId): ProducerRequest = {
@@ -436,36 +500,51 @@ object TestUtils extends Logging {
     }
   }
 
-  def waitUntilLeaderIsElectedOrChanged(zkClient: ZkClient, topic: String, partition: Int, timeoutMs: Long, oldLeaderOpt: Option[Int] = None): Option[Int] = {
-    val leaderLock = new ReentrantLock()
-    val leaderExistsOrChanged = leaderLock.newCondition()
+  /**
+   *  If neither oldLeaderOpt nor newLeaderOpt is defined, wait until the leader of a partition is elected.
+   *  If oldLeaderOpt is defined, it waits until the new leader is different from the old leader.
+   *  If newLeaderOpt is defined, it waits until the new leader becomes the expected new leader.
+   * @return The new leader or assertion failure if timeout is reached.
+   */
+  def waitUntilLeaderIsElectedOrChanged(zkClient: ZkClient, topic: String, partition: Int, timeoutMs: Long = 5000L,
+                                        oldLeaderOpt: Option[Int] = None, newLeaderOpt: Option[Int] = None): Option[Int] = {
+    require(!(oldLeaderOpt.isDefined && newLeaderOpt.isDefined), "Can't define both the old and the new leader")
+    val startTime = System.currentTimeMillis()
+    var isLeaderElectedOrChanged = false
 
-    if(oldLeaderOpt == None)
-      info("Waiting for leader to be elected for partition [%s,%d]".format(topic, partition))
-    else
-      info("Waiting for leader for partition [%s,%d] to be changed from old leader %d".format(topic, partition, oldLeaderOpt.get))
+    trace("Waiting for leader to be elected or changed for partition [%s,%d], older leader is %s, new leader is %s"
+          .format(topic, partition, oldLeaderOpt, newLeaderOpt))
 
-    leaderLock.lock()
-    try {
-      zkClient.subscribeDataChanges(ZkUtils.getTopicPartitionLeaderAndIsrPath(topic, partition), new LeaderExistsOrChangedListener(topic, partition, leaderLock, leaderExistsOrChanged, oldLeaderOpt, zkClient))
-      leaderExistsOrChanged.await(timeoutMs, TimeUnit.MILLISECONDS)
+    var leader: Option[Int] = None
+    while (!isLeaderElectedOrChanged && System.currentTimeMillis() < startTime + timeoutMs) {
       // check if leader is elected
-      val leader = ZkUtils.getLeaderForPartition(zkClient, topic, partition)
+      leader = ZkUtils.getLeaderForPartition(zkClient, topic, partition)
       leader match {
         case Some(l) =>
-          if(oldLeaderOpt == None)
-            info("Leader %d is elected for partition [%s,%d]".format(l, topic, partition))
-          else
-            info("Leader for partition [%s,%d] is changed from %d to %d".format(topic, partition, oldLeaderOpt.get, l))
-        case None => error("Timing out after %d ms since leader is not elected for partition [%s,%d]"
-                                   .format(timeoutMs, topic, partition))
+          if (newLeaderOpt.isDefined && newLeaderOpt.get == l) {
+            trace("Expected new leader %d is elected for partition [%s,%d]".format(l, topic, partition))
+            isLeaderElectedOrChanged = true
+          } else if (oldLeaderOpt.isDefined && oldLeaderOpt.get != l) {
+            trace("Leader for partition [%s,%d] is changed from %d to %d".format(topic, partition, oldLeaderOpt.get, l))
+            isLeaderElectedOrChanged = true
+          } else if (!oldLeaderOpt.isDefined) {
+            trace("Leader %d is elected for partition [%s,%d]".format(l, topic, partition))
+            isLeaderElectedOrChanged = true
+          } else {
+            trace("Current leader for partition [%s,%d] is %d".format(topic, partition, l))
+          }
+        case None =>
+          trace("Leader for partition [%s,%d] is not elected yet".format(topic, partition))
       }
-      leader
-    } finally {
-      leaderLock.unlock()
+      Thread.sleep(timeoutMs.min(100L))
     }
+    if (!isLeaderElectedOrChanged)
+      fail("Timing out after %d ms since leader is not elected or changed for partition [%s,%d]"
+           .format(timeoutMs, topic, partition))
+
+    return leader
   }
-  
+
   /**
    * Execute the given block. If it throws an assert error, retry. Repeat
    * until no error is thrown or the time limit ellapses
@@ -479,7 +558,7 @@ object TestUtils extends Logging {
         return
       } catch {
         case e: AssertionFailedError =>
-          val ellapsed = System.currentTimeMillis - startTime 
+          val ellapsed = System.currentTimeMillis - startTime
           if(ellapsed > maxWaitMs) {
             throw e
           } else {
@@ -492,15 +571,15 @@ object TestUtils extends Logging {
   }
 
   /**
-   * Wait until the given condition is true or the given wait time ellapses
+   * Wait until the given condition is true or throw an exception if the given wait time elapses.
    */
-  def waitUntilTrue(condition: () => Boolean, waitTime: Long): Boolean = {
+  def waitUntilTrue(condition: () => Boolean, msg: String, waitTime: Long = 5000L): Boolean = {
     val startTime = System.currentTimeMillis()
     while (true) {
       if (condition())
         return true
       if (System.currentTimeMillis() > startTime + waitTime)
-        return false
+        fail(msg)
       Thread.sleep(waitTime.min(100L))
     }
     // should never hit here
@@ -528,12 +607,35 @@ object TestUtils extends Logging {
     byteBuffer
   }
 
-  def waitUntilMetadataIsPropagated(servers: Seq[KafkaServer], topic: String, partition: Int, timeout: Long) = {
-    assertTrue("Partition [%s,%d] metadata not propagated after timeout".format(topic, partition),
-      TestUtils.waitUntilTrue(() =>
-        servers.foldLeft(true)(_ && _.apis.metadataCache.keySet.contains(TopicAndPartition(topic, partition))), timeout))
+
+  /**
+   * Wait until a valid leader is propagated to the metadata cache in each broker.
+   * It assumes that the leader propagated to each broker is the same.
+   * @param servers The list of servers that the metadata should reach to
+   * @param topic The topic name
+   * @param partition The partition Id
+   * @param timeout The amount of time waiting on this condition before assert to fail
+   * @return The leader of the partition.
+   */
+  def waitUntilMetadataIsPropagated(servers: Seq[KafkaServer], topic: String, partition: Int, timeout: Long = 5000L): Int = {
+    var leader: Int = -1
+    TestUtils.waitUntilTrue(() =>
+      servers.foldLeft(true) {
+        (result, server) =>
+          val partitionStateOpt = server.apis.metadataCache.getPartitionInfo(topic, partition)
+          partitionStateOpt match {
+            case None => false
+            case Some(partitionState) =>
+              leader = partitionState.leaderIsrAndControllerEpoch.leaderAndIsr.leader
+              result && Request.isValidBrokerId(leader)
+          }
+      },
+      "Partition [%s,%d] metadata not propagated after %d ms".format(topic, partition, timeout),
+      waitTime = timeout)
+
+    leader
   }
-  
+
   def writeNonsenseToFile(fileName: File, position: Long, size: Int) {
     val file = new RandomAccessFile(fileName, "rw")
     file.seek(position)
@@ -541,7 +643,7 @@ object TestUtils extends Logging {
       file.writeByte(random.nextInt(255))
     file.close()
   }
-  
+
   def appendNonsenseToFile(fileName: File, size: Int) {
     val file = new FileOutputStream(fileName, true)
     for(i <- 0 until size)
@@ -559,14 +661,22 @@ object TestUtils extends Logging {
 
   def ensureNoUnderReplicatedPartitions(zkClient: ZkClient, topic: String, partitionToBeReassigned: Int, assignedReplicas: Seq[Int],
                                                 servers: Seq[KafkaServer]) {
-    val inSyncReplicas = ZkUtils.getInSyncReplicasForPartition(zkClient, topic, partitionToBeReassigned)
-    assertFalse("Reassigned partition [%s,%d] is underreplicated".format(topic, partitionToBeReassigned),
-      inSyncReplicas.size < assignedReplicas.size)
-    val leader = ZkUtils.getLeaderForPartition(zkClient, topic, partitionToBeReassigned)
-    assertTrue("Reassigned partition [%s,%d] is unavailable".format(topic, partitionToBeReassigned), leader.isDefined)
-    val leaderBroker = servers.filter(s => s.config.brokerId == leader.get).head
-    assertTrue("Reassigned partition [%s,%d] is underreplicated as reported by the leader %d".format(topic, partitionToBeReassigned, leader.get),
-      leaderBroker.replicaManager.underReplicatedPartitionCount() == 0)
+    TestUtils.waitUntilTrue(() => {
+        val inSyncReplicas = ZkUtils.getInSyncReplicasForPartition(zkClient, topic, partitionToBeReassigned)
+        inSyncReplicas.size == assignedReplicas.size
+      },
+      "Reassigned partition [%s,%d] is under replicated".format(topic, partitionToBeReassigned))
+    var leader: Option[Int] = None
+    TestUtils.waitUntilTrue(() => {
+        leader = ZkUtils.getLeaderForPartition(zkClient, topic, partitionToBeReassigned)
+        leader.isDefined
+      },
+      "Reassigned partition [%s,%d] is unavailable".format(topic, partitionToBeReassigned))
+    TestUtils.waitUntilTrue(() => {
+        val leaderBroker = servers.filter(s => s.config.brokerId == leader.get).head
+        leaderBroker.replicaManager.underReplicatedPartitionCount() == 0
+      },
+      "Reassigned partition [%s,%d] is under-replicated as reported by the leader %d".format(topic, partitionToBeReassigned, leader.get))
   }
 
   def checkIfReassignPartitionPathExists(zkClient: ZkClient): Boolean = {

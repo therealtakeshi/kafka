@@ -117,7 +117,7 @@ def generate_testcase_log_dirs(systemTestEnv, testcaseEnv):
         # create the role directory under dashboards
         dashboardsRoleDir = dashboardsPathName + "/" + role
         if not os.path.exists(dashboardsRoleDir) : os.makedirs(dashboardsRoleDir)
-        
+
 
 def collect_logs_from_remote_hosts(systemTestEnv, testcaseEnv):
     anonLogger.info("================================================")
@@ -212,7 +212,7 @@ def collect_logs_from_remote_hosts(systemTestEnv, testcaseEnv):
     logger.debug("executing command [" + cmdStr + "]", extra=d)
     system_test_utils.sys_call(cmdStr)
 
- 
+
 def generate_testcase_log_dirs_in_remote_hosts(systemTestEnv, testcaseEnv):
     testCaseBaseDir = testcaseEnv.testCaseBaseDir
 
@@ -432,9 +432,9 @@ def generate_overriden_props_files(testsuitePathname, testcaseEnv, systemTestEnv
                             sys.exit(1)
 
                     addedCSVConfig = {}
-                    addedCSVConfig["kafka.csv.metrics.dir"] = get_testcase_config_log_dir_pathname(testcaseEnv, "broker", clusterCfg["entity_id"], "metrics") 
-                    addedCSVConfig["kafka.metrics.polling.interval.secs"] = "5" 
-                    addedCSVConfig["kafka.metrics.reporters"] = "kafka.metrics.KafkaCSVMetricsReporter" 
+                    addedCSVConfig["kafka.csv.metrics.dir"] = get_testcase_config_log_dir_pathname(testcaseEnv, "broker", clusterCfg["entity_id"], "metrics")
+                    addedCSVConfig["kafka.metrics.polling.interval.secs"] = "5"
+                    addedCSVConfig["kafka.metrics.reporters"] = "kafka.metrics.KafkaCSVMetricsReporter"
                     addedCSVConfig["kafka.csv.metrics.reporter.enabled"] = "true"
 
                     if brokerVersion == "0.7":
@@ -458,6 +458,7 @@ def generate_overriden_props_files(testsuitePathname, testcaseEnv, systemTestEnv
 
                 elif ( clusterCfg["role"] == "mirror_maker"):
                     tcCfg["metadata.broker.list"] = testcaseEnv.userDefinedEnvVarDict["targetBrokerList"]
+                    tcCfg["bootstrap.servers"] = testcaseEnv.userDefinedEnvVarDict["targetBrokerList"] # for new producer
                     copy_file_with_dict_values(cfgTemplatePathname + "/mirror_producer.properties",
                         cfgDestPathname + "/" + tcCfg["mirror_producer_config_filename"], tcCfg, None)
 
@@ -465,7 +466,7 @@ def generate_overriden_props_files(testsuitePathname, testcaseEnv, systemTestEnv
                     tcCfg["zookeeper.connect"] = testcaseEnv.userDefinedEnvVarDict["sourceZkConnectStr"]
                     copy_file_with_dict_values(cfgTemplatePathname + "/mirror_consumer.properties",
                         cfgDestPathname + "/" + tcCfg["mirror_consumer_config_filename"], tcCfg, None)
-                
+
                 else:
                     logger.debug("UNHANDLED role " + clusterCfg["role"], extra=d)
 
@@ -494,7 +495,7 @@ def scp_file_to_remote_host(clusterEntityConfigDictList, testcaseEnv):
 def start_zookeepers(systemTestEnv, testcaseEnv):
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
 
-    zkEntityIdList = system_test_utils.get_data_from_list_of_dicts( 
+    zkEntityIdList = system_test_utils.get_data_from_list_of_dicts(
         clusterEntityConfigDictList, "role", "zookeeper", "entity_id")
 
     for zkEntityId in zkEntityIdList:
@@ -533,11 +534,22 @@ def start_zookeepers(systemTestEnv, testcaseEnv):
 def start_brokers(systemTestEnv, testcaseEnv):
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
 
-    brokerEntityIdList = system_test_utils.get_data_from_list_of_dicts( 
+    brokerEntityIdList = system_test_utils.get_data_from_list_of_dicts(
         clusterEntityConfigDictList, "role", "broker", "entity_id")
 
     for brokerEntityId in brokerEntityIdList:
         start_entity_in_background(systemTestEnv, testcaseEnv, brokerEntityId)
+
+def start_console_consumers(systemTestEnv, testcaseEnv, onlyThisEntityId=None):
+
+    if onlyThisEntityId is not None:
+        start_entity_in_background(systemTestEnv, testcaseEnv, onlyThisEntityId)
+    else:
+        clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
+        consoleConsumerEntityIdList = system_test_utils.get_data_from_list_of_dicts(
+            clusterEntityConfigDictList, "role", "console_consumer", "entity_id")
+        for entityId in consoleConsumerEntityIdList:
+            start_entity_in_background(systemTestEnv, testcaseEnv, entityId)
 
 
 def start_mirror_makers(systemTestEnv, testcaseEnv, onlyThisEntityId=None):
@@ -546,7 +558,7 @@ def start_mirror_makers(systemTestEnv, testcaseEnv, onlyThisEntityId=None):
         start_entity_in_background(systemTestEnv, testcaseEnv, onlyThisEntityId)
     else:
         clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
-        brokerEntityIdList          = system_test_utils.get_data_from_list_of_dicts( 
+        brokerEntityIdList          = system_test_utils.get_data_from_list_of_dicts(
                                       clusterEntityConfigDictList, "role", "mirror_maker", "entity_id")
 
         for brokerEntityId in brokerEntityIdList:
@@ -559,17 +571,17 @@ def get_broker_shutdown_log_line(systemTestEnv, testcaseEnv, leaderAttributesDic
 
     # keep track of broker related data in this dict such as broker id,
     # entity id and timestamp and return it to the caller function
-    shutdownBrokerDict = {} 
+    shutdownBrokerDict = {}
 
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
-    brokerEntityIdList = system_test_utils.get_data_from_list_of_dicts( 
+    brokerEntityIdList = system_test_utils.get_data_from_list_of_dicts(
                              clusterEntityConfigDictList, "role", "broker", "entity_id")
 
     for brokerEntityId in brokerEntityIdList:
 
-        hostname   = system_test_utils.get_data_by_lookup_keyval( 
+        hostname   = system_test_utils.get_data_by_lookup_keyval(
                          clusterEntityConfigDictList, "entity_id", brokerEntityId, "hostname")
-        logFile    = system_test_utils.get_data_by_lookup_keyval( 
+        logFile    = system_test_utils.get_data_by_lookup_keyval(
                          testcaseEnv.testcaseConfigsList, "entity_id", brokerEntityId, "log_filename")
 
         logPathName = get_testcase_config_log_dir_pathname(testcaseEnv, "broker", brokerEntityId, "default")
@@ -617,7 +629,7 @@ def get_leader_elected_log_line(systemTestEnv, testcaseEnv, leaderAttributesDict
 
     # keep track of leader related data in this dict such as broker id,
     # entity id and timestamp and return it to the caller function
-    leaderDict = {} 
+    leaderDict = {}
 
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
     brokerEntityIdList = system_test_utils.get_data_from_list_of_dicts( \
@@ -696,6 +708,7 @@ def start_entity_in_background(systemTestEnv, testcaseEnv, entityId):
     configFile = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "config_filename")
     logFile    = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "log_filename")
 
+    useNewProducer = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "new-producer")
     mmConsumerConfigFile = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId,
                            "mirror_consumer_config_filename")
     mmProducerConfigFile = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId,
@@ -722,27 +735,107 @@ def start_entity_in_background(systemTestEnv, testcaseEnv, entityId):
     elif role == "broker":
         cmdList = ["ssh " + hostname,
                   "'JAVA_HOME=" + javaHome,
-                 "JMX_PORT=" + jmxPort,
+                  "JMX_PORT=" + jmxPort,
+                  "KAFKA_LOG4J_OPTS=-Dlog4j.configuration=file:%s/config/log4j.properties" % kafkaHome,
                   kafkaHome + "/bin/kafka-run-class.sh kafka.Kafka",
                   configPathName + "/" + configFile + " >> ",
                   logPathName + "/" + logFile + " & echo pid:$! > ",
                   logPathName + "/entity_" + entityId + "_pid'"]
 
     elif role == "mirror_maker":
+        if useNewProducer.lower() == "true":
+            cmdList = ["ssh " + hostname,
+                      "'JAVA_HOME=" + javaHome,
+                      "JMX_PORT=" + jmxPort,
+                      kafkaHome + "/bin/kafka-run-class.sh kafka.tools.MirrorMaker",
+                      "--consumer.config " + configPathName + "/" + mmConsumerConfigFile,
+                      "--producer.config " + configPathName + "/" + mmProducerConfigFile,
+                      "--new.producer",
+                      "--whitelist=\".*\" >> ",
+                      logPathName + "/" + logFile + " & echo pid:$! > ",
+                      logPathName + "/entity_" + entityId + "_pid'"]
+        else:
+            cmdList = ["ssh " + hostname,
+                      "'JAVA_HOME=" + javaHome,
+                      "JMX_PORT=" + jmxPort,
+                      kafkaHome + "/bin/kafka-run-class.sh kafka.tools.MirrorMaker",
+                      "--consumer.config " + configPathName + "/" + mmConsumerConfigFile,
+                      "--producer.config " + configPathName + "/" + mmProducerConfigFile,
+                      "--whitelist=\".*\" >> ",
+                      logPathName + "/" + logFile + " & echo pid:$! > ",
+                      logPathName + "/entity_" + entityId + "_pid'"]
+
+    elif role == "console_consumer":
+        clusterToConsumeFrom = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "cluster_name")
+        numTopicsForAutoGenString = -1
+        try:
+            numTopicsForAutoGenString = int(testcaseEnv.testcaseArgumentsDict["num_topics_for_auto_generated_string"])
+        except:
+            pass
+
+        topic = ""
+        if numTopicsForAutoGenString < 0:
+            topic = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "topic")
+        else:
+            topic = generate_topics_string("topic", numTopicsForAutoGenString)
+
+        # update this variable and will be used by data validation functions
+        testcaseEnv.consumerTopicsString = topic
+
+        # 2. consumer timeout
+        timeoutMs = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "consumer-timeout-ms")
+
+        # 3. consumer formatter
+        formatterOption = ""
+        try:
+            formatterOption = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "formatter")
+        except:
+            pass
+
+	# 4. consumer config
+	consumerProperties = {}
+	consumerProperties["consumer.timeout.ms"] = timeoutMs
+	try:
+            groupOption = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "group.id")
+            consumerProperties["group.id"] = groupOption
+        except:
+            pass
+
+	props_file_path=write_consumer_properties(consumerProperties)
+	scpCmdStr = "scp "+ props_file_path +" "+ hostname + ":/tmp/"
+	logger.debug("executing command [" + scpCmdStr + "]", extra=d)
+	system_test_utils.sys_call(scpCmdStr)
+
+        if len(formatterOption) > 0:
+            formatterOption = " --formatter " + formatterOption + " "
+
+        # get zookeeper connect string
+        zkConnectStr = ""
+        if clusterName == "source":
+            zkConnectStr = testcaseEnv.userDefinedEnvVarDict["sourceZkConnectStr"]
+        elif clusterName == "target":
+            zkConnectStr = testcaseEnv.userDefinedEnvVarDict["targetZkConnectStr"]
+        else:
+            logger.error("Invalid cluster name : " + clusterName, extra=d)
+            sys.exit(1)
         cmdList = ["ssh " + hostname,
-                  "'JAVA_HOME=" + javaHome,
-                 "JMX_PORT=" + jmxPort,
-                  kafkaHome + "/bin/kafka-run-class.sh kafka.tools.MirrorMaker",
-                  "--consumer.config " + configPathName + "/" + mmConsumerConfigFile,
-                  "--producer.config " + configPathName + "/" + mmProducerConfigFile,
-                  "--whitelist=\".*\" >> ",
-                  logPathName + "/" + logFile + " & echo pid:$! > ",
-                  logPathName + "/entity_" + entityId + "_pid'"]
+                   "'JAVA_HOME=" + javaHome,
+                   "JMX_PORT=" + jmxPort,
+                   kafkaHome + "/bin/kafka-run-class.sh kafka.tools.ConsoleConsumer",
+                   "--zookeeper " + zkConnectStr,
+                   "--topic " + topic,
+                   "--consumer.config /tmp/consumer.properties",
+                   "--csv-reporter-enabled",
+                   formatterOption,
+                   "--from-beginning",
+                   " >> " + logPathName + "/" + logFile + " & echo pid:$! > ",
+                   logPathName + "/entity_" + entityId + "_pid'"]
 
     cmdStr = " ".join(cmdList)
 
     logger.debug("executing command: [" + cmdStr + "]", extra=d)
     system_test_utils.async_sys_call(cmdStr)
+    logger.info("sleeping for 5 seconds.", extra=d)
     time.sleep(5)
 
     pidCmdStr = "ssh " + hostname + " 'cat " + logPathName + "/entity_" + entityId + "_pid' 2> /dev/null"
@@ -761,6 +854,8 @@ def start_entity_in_background(systemTestEnv, testcaseEnv, entityId):
                 testcaseEnv.entityBrokerParentPidDict[entityId] = tokens[1]
             elif role == "mirror_maker":
                 testcaseEnv.entityMirrorMakerParentPidDict[entityId] = tokens[1]
+            elif role == "console_consumer":
+                testcaseEnv.entityConsoleConsumerParentPidDict[entityId] = tokens[1]
 
 
 def start_console_consumer(systemTestEnv, testcaseEnv):
@@ -771,9 +866,9 @@ def start_console_consumer(systemTestEnv, testcaseEnv):
     for consumerConfig in consumerConfigList:
         host              = consumerConfig["hostname"]
         entityId          = consumerConfig["entity_id"]
-        jmxPort           = consumerConfig["jmx_port"] 
+        jmxPort           = consumerConfig["jmx_port"]
         role              = consumerConfig["role"]
-        clusterName       = consumerConfig["cluster_name"] 
+        clusterName       = consumerConfig["cluster_name"]
         kafkaHome         = system_test_utils.get_data_by_lookup_keyval(clusterList, "entity_id", entityId, "kafka_home")
         javaHome          = system_test_utils.get_data_by_lookup_keyval(clusterList, "entity_id", entityId, "java_home")
         jmxPort           = system_test_utils.get_data_by_lookup_keyval(clusterList, "entity_id", entityId, "jmx_port")
@@ -835,13 +930,20 @@ def start_console_consumer(systemTestEnv, testcaseEnv):
             logger.error("Invalid cluster name : " + clusterName, extra=d)
             sys.exit(1)
 
+	consumerProperties = {}
+	consumerProperties["consumer.timeout.ms"] = timeoutMs
+	props_file_path=write_consumer_properties(consumerProperties)
+	scpCmdStr = "scp "+ props_file_path +" "+ host + ":/tmp/"
+	logger.debug("executing command [" + scpCmdStr + "]", extra=d)
+	system_test_utils.sys_call(scpCmdStr)
+
         cmdList = ["ssh " + host,
                    "'JAVA_HOME=" + javaHome,
                    "JMX_PORT=" + jmxPort,
-                   kafkaRunClassBin + " kafka.consumer.ConsoleConsumer",
+                   kafkaRunClassBin + " kafka.tools.ConsoleConsumer",
                    "--zookeeper " + zkConnectStr,
                    "--topic " + topic,
-                   "--consumer-timeout-ms " + timeoutMs,
+                   "--consumer.config /tmp/consumer.properties",
                    "--csv-reporter-enabled",
                    #"--metrics-dir " + metricsDir,
                    formatterOption,
@@ -884,14 +986,16 @@ def start_producer_performance(systemTestEnv, testcaseEnv, kafka07Client):
     for producerConfig in producerConfigList:
         host              = producerConfig["hostname"]
         entityId          = producerConfig["entity_id"]
-        jmxPort           = producerConfig["jmx_port"] 
-        role              = producerConfig["role"] 
+        jmxPort           = producerConfig["jmx_port"]
+        role              = producerConfig["role"]
 
         thread.start_new_thread(start_producer_in_thread, (testcaseEnv, entityConfigList, producerConfig, kafka07Client))
+        logger.debug("calling testcaseEnv.lock.acquire()", extra=d)
         testcaseEnv.lock.acquire()
         testcaseEnv.numProducerThreadsRunning += 1
         logger.debug("testcaseEnv.numProducerThreadsRunning : " + str(testcaseEnv.numProducerThreadsRunning), extra=d)
         time.sleep(1)
+        logger.debug("calling testcaseEnv.lock.release()", extra=d)
         testcaseEnv.lock.release()
 
 def generate_topics_string(topicPrefix, numOfTopics):
@@ -925,13 +1029,16 @@ def generate_topics_string(topicPrefix, numOfTopics):
 def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafka07Client):
     host              = producerConfig["hostname"]
     entityId          = producerConfig["entity_id"]
-    jmxPort           = producerConfig["jmx_port"] 
+    jmxPort           = producerConfig["jmx_port"]
     role              = producerConfig["role"]
     clusterName       = producerConfig["cluster_name"]
     kafkaHome         = system_test_utils.get_data_by_lookup_keyval(entityConfigList, "entity_id", entityId, "kafka_home")
     javaHome          = system_test_utils.get_data_by_lookup_keyval(entityConfigList, "entity_id", entityId, "java_home")
     jmxPort           = system_test_utils.get_data_by_lookup_keyval(entityConfigList, "entity_id", entityId, "jmx_port")
     kafkaRunClassBin  = kafkaHome + "/bin/kafka-run-class.sh"
+
+    # first keep track of its pid
+    testcaseEnv.producerHostParentPidDict[entityId] = os.getpid()
 
     # get optional testcase arguments
     numTopicsForAutoGenString = -1
@@ -957,6 +1064,7 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
     noMsgPerBatch  = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "message")
     requestNumAcks = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "request-num-acks")
     syncMode       = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "sync")
+    useNewProducer = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "new-producer")
     retryBackoffMs = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "producer-retry-backoff-ms")
     numOfRetries   = system_test_utils.get_data_by_lookup_keyval(testcaseConfigsList, "entity_id", entityId, "producer-num-retries")
 
@@ -995,6 +1103,8 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
     boolArgumentsStr = ""
     if syncMode.lower() == "true":
         boolArgumentsStr = boolArgumentsStr + " --sync"
+    if useNewProducer.lower() == "true":
+        boolArgumentsStr = boolArgumentsStr + " --new-producer"
 
     # keep calling producer until signaled to stop by:
     # testcaseEnv.userDefinedEnvVarDict["stopBackgroundProducer"]
@@ -1011,7 +1121,7 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
                        "'JAVA_HOME=" + javaHome,
                        "JMX_PORT=" + jmxPort,
                        "KAFKA_LOG4J_OPTS=-Dlog4j.configuration=file:%s/config/test-log4j.properties" % kafkaHome,
-                       kafkaRunClassBin + " kafka.perf.ProducerPerformance",
+                       kafkaRunClassBin + " kafka.tools.ProducerPerformance",
                        "--broker-list " + brokerListStr,
                        "--initial-message-id " + str(initMsgId),
                        "--messages " + noMsgPerBatch,
@@ -1026,7 +1136,7 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
                        "--metrics-dir " + metricsDir,
                        boolArgumentsStr,
                        " >> " + producerLogPathName,
-                       " & echo pid:$! > " + producerLogPath + "/entity_" + entityId + "_pid'"]
+                       " & echo $! > " + producerLogPath + "/entity_" + entityId + "_pid'"]
 
             if kafka07Client:
                 cmdList[:] = []
@@ -1047,7 +1157,7 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
                        "'JAVA_HOME=" + javaHome,
                        "JMX_PORT=" + jmxPort,
                        "KAFKA_LOG4J_OPTS=-Dlog4j.configuration=file:%s/config/test-log4j.properties" % kafkaHome,
-                       kafkaRunClassBin + " kafka.perf.ProducerPerformance",
+                       kafkaRunClassBin + " kafka.tools.ProducerPerformance",
                        "--brokerinfo " + brokerInfoStr,
                        "--initial-message-id " + str(initMsgId),
                        "--messages " + noMsgPerBatch,
@@ -1057,17 +1167,19 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
                        "--message-size " + messageSize,
                        "--vary-message-size --async",
                        " >> " + producerLogPathName,
-                       " & echo pid:$! > " + producerLogPath + "/entity_" + entityId + "_pid'"]
+                       " & echo $! > " + producerLogPath + "/entity_" + entityId + "_pid'"]
 
             cmdStr = " ".join(cmdList)
             logger.debug("executing command: [" + cmdStr + "]", extra=d)
 
             subproc = system_test_utils.sys_call_return_subproc(cmdStr)
-            for line in subproc.stdout.readlines():
-                pass    # dummy loop to wait until producer is completed
+            logger.debug("waiting for producer to finish", extra=d)
+            subproc.communicate()
+            logger.debug("producer finished", extra=d)
         else:
             testcaseEnv.numProducerThreadsRunning -= 1
             logger.debug("testcaseEnv.numProducerThreadsRunning : " + str(testcaseEnv.numProducerThreadsRunning), extra=d)
+            logger.debug("calling testcaseEnv.lock.release()", extra=d)
             testcaseEnv.lock.release()
             break
 
@@ -1079,16 +1191,22 @@ def start_producer_in_thread(testcaseEnv, entityConfigList, producerConfig, kafk
     # wait until other producer threads also stops and
     # let the main testcase know all producers have stopped
     while 1:
+        logger.debug("calling testcaseEnv.lock.acquire()", extra=d)
         testcaseEnv.lock.acquire()
         time.sleep(1)
         if testcaseEnv.numProducerThreadsRunning == 0:
             testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"] = True
+            logger.debug("calling testcaseEnv.lock.release()", extra=d)
             testcaseEnv.lock.release()
             break
         else:
             logger.debug("waiting for TRUE of testcaseEnv.userDefinedEnvVarDict['backgroundProducerStopped']", extra=d)
+            logger.debug("calling testcaseEnv.lock.release()", extra=d)
             testcaseEnv.lock.release()
         time.sleep(1)
+
+    # finally remove itself from the tracking pids
+    del testcaseEnv.producerHostParentPidDict[entityId]
 
 def stop_remote_entity(systemTestEnv, entityId, parentPid, signalType="SIGTERM"):
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
@@ -1096,7 +1214,7 @@ def stop_remote_entity(systemTestEnv, entityId, parentPid, signalType="SIGTERM")
     hostname  = system_test_utils.get_data_by_lookup_keyval(clusterEntityConfigDictList, "entity_id", entityId, "hostname")
     pidStack  = system_test_utils.get_remote_child_processes(hostname, parentPid)
 
-    logger.debug("terminating (" + signalType + ") process id: " + parentPid + " in host: " + hostname, extra=d)
+    logger.info("terminating (" + signalType + ") process id: " + parentPid + " in host: " + hostname, extra=d)
 
     if signalType.lower() == "sigterm":
         system_test_utils.sigterm_remote_process(hostname, pidStack)
@@ -1117,7 +1235,7 @@ def force_stop_remote_entity(systemTestEnv, entityId, parentPid):
     system_test_utils.sigkill_remote_process(hostname, pidStack)
 
 
-def create_topic(systemTestEnv, testcaseEnv):
+def create_topic_for_producer_performance(systemTestEnv, testcaseEnv):
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
 
     prodPerfCfgList = system_test_utils.get_dict_from_list_of_dicts(clusterEntityConfigDictList, "role", "producer_performance")
@@ -1149,7 +1267,7 @@ def create_topic(systemTestEnv, testcaseEnv):
             testcaseBaseDir = replace_kafka_home(testcaseBaseDir, kafkaHome)
 
         for topic in topicsList:
-            logger.info("creating topic: [" + topic + "] at: [" + zkConnectStr + "]", extra=d) 
+            logger.info("creating topic: [" + topic + "] at: [" + zkConnectStr + "]", extra=d)
             cmdList = ["ssh " + zkHost,
                        "'JAVA_HOME=" + javaHome,
                        createTopicBin,
@@ -1158,10 +1276,44 @@ def create_topic(systemTestEnv, testcaseEnv):
                        " --replication-factor "   + testcaseEnv.testcaseArgumentsDict["replica_factor"],
                        " --partitions " + testcaseEnv.testcaseArgumentsDict["num_partition"] + " >> ",
                        testcaseBaseDir + "/logs/create_source_cluster_topic.log'"]
-    
+
             cmdStr = " ".join(cmdList)
             logger.debug("executing command: [" + cmdStr + "]", extra=d)
             subproc = system_test_utils.sys_call_return_subproc(cmdStr)
+
+def create_topic(systemTestEnv, testcaseEnv, topic, replication_factor, num_partitions):
+    clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
+    zkEntityId      = system_test_utils.get_data_by_lookup_keyval(clusterEntityConfigDictList, "role", "zookeeper", "entity_id")
+    kafkaHome       = system_test_utils.get_data_by_lookup_keyval(clusterEntityConfigDictList, "entity_id", zkEntityId, "kafka_home")
+    javaHome        = system_test_utils.get_data_by_lookup_keyval(clusterEntityConfigDictList, "entity_id", zkEntityId, "java_home")
+    createTopicBin  = kafkaHome + "/bin/kafka-topics.sh --create"
+    zkConnectStr = ""
+    zkHost = system_test_utils.get_data_by_lookup_keyval(clusterEntityConfigDictList, "role", "zookeeper", "hostname")
+    if len(testcaseEnv.userDefinedEnvVarDict["sourceZkConnectStr"]) > 0:
+        zkConnectStr = testcaseEnv.userDefinedEnvVarDict["sourceZkConnectStr"]
+    elif len(testcaseEnv.userDefinedEnvVarDict["targetZkConnectStr"]) > 0:
+        zkConnectStr = testcaseEnv.userDefinedEnvVarDict["targetZkConnectStr"]
+    else:
+        raise Exception("Empty zkConnectStr found")
+
+    testcaseBaseDir = testcaseEnv.testCaseBaseDir
+
+    testcaseBaseDir = replace_kafka_home(testcaseBaseDir, kafkaHome)
+
+    logger.debug("creating topic: [" + topic + "] at: [" + zkConnectStr + "]", extra=d)
+    cmdList = ["ssh " + zkHost,
+               "'JAVA_HOME=" + javaHome,
+               createTopicBin,
+               " --topic "     + topic,
+               " --zookeeper " + zkConnectStr,
+               " --replication-factor "   + str(replication_factor),
+               " --partitions " + str(num_partitions) + " >> ",
+               testcaseBaseDir + "/logs/create_source_cluster_topic.log'"]
+
+    cmdStr = " ".join(cmdList)
+    logger.info("executing command: [" + cmdStr + "]", extra=d)
+    subproc = system_test_utils.sys_call_return_subproc(cmdStr)
+
 
 
 def get_message_id(logPathName, topic=""):
@@ -1200,7 +1352,7 @@ def get_message_checksum(logPathName):
 
 
 def validate_data_matched(systemTestEnv, testcaseEnv, replicationUtils):
-    logger.debug("#### Inside validate_data_matched", extra=d)
+    logger.info("#### Inside validate_data_matched", extra=d)
 
     validationStatusDict        = testcaseEnv.validationStatusDict
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
@@ -1224,11 +1376,11 @@ def validate_data_matched(systemTestEnv, testcaseEnv, replicationUtils):
             consumerTopic = system_test_utils.get_data_by_lookup_keyval(testcaseEnv.testcaseConfigsList, "entity_id", consumerEntityId, "topic")
             if consumerTopic in topic:
                 matchingConsumerEntityId = consumerEntityId
-                logger.debug("matching consumer entity id found", extra=d)
+                logger.info("matching consumer entity id found", extra=d)
                 break
 
         if matchingConsumerEntityId is None:
-            logger.debug("matching consumer entity id NOT found", extra=d)
+            logger.info("matching consumer entity id NOT found", extra=d)
             break
 
         msgIdMissingInConsumerLogPathName = get_testcase_config_log_dir_pathname( \
@@ -1316,7 +1468,7 @@ def cleanup_data_at_remote_hosts(systemTestEnv, testcaseEnv):
     logger.info("cleaning up test case dir: [" + testCaseBaseDir + "]", extra=d)
 
     if "system_test" not in testCaseBaseDir:
-        logger.warn("possible destructive command [" + cmdStr + "]", extra=d)
+        # logger.warn("possible destructive command [" + cmdStr + "]", extra=d)
         logger.warn("check config file: system_test/cluster_config.properties", extra=d)
         logger.warn("aborting test...", extra=d)
         sys.exit(1)
@@ -1416,7 +1568,7 @@ def ps_grep_terminate_running_entity(systemTestEnv):
         cmdStr = " ".join(cmdList)
         logger.debug("executing command [" + cmdStr + "]", extra=d)
 
-        system_test_utils.sys_call(cmdStr) 
+        system_test_utils.sys_call(cmdStr)
 
 def get_reelection_latency(systemTestEnv, testcaseEnv, leaderDict, leaderAttributesDict):
     leaderEntityId = None
@@ -1473,7 +1625,7 @@ def get_reelection_latency(systemTestEnv, testcaseEnv, leaderDict, leaderAttribu
     if shutdownTimestamp > 0:
         leaderReElectionLatency = float(leaderDict2["timestamp"]) - float(shutdownTimestamp)
         logger.info("leader Re-election Latency: " + str(leaderReElectionLatency) + " sec", extra=d)
- 
+
     return leaderReElectionLatency
 
 
@@ -1481,9 +1633,36 @@ def stop_all_remote_running_processes(systemTestEnv, testcaseEnv):
 
     entityConfigs = systemTestEnv.clusterEntityConfigDictList
 
-    for hostname, producerPPid in testcaseEnv.producerHostParentPidDict.items():
-        producerEntityId = system_test_utils.get_data_by_lookup_keyval(entityConfigs, "hostname", hostname, "entity_id")
-        stop_remote_entity(systemTestEnv, producerEntityId, producerPPid)
+    # If there are any alive local threads that keep starting remote producer performance, we need to kill them;
+    # note we do not need to stop remote processes since they will terminate themselves eventually.
+    if len(testcaseEnv.producerHostParentPidDict) != 0:
+        # =============================================
+        # tell producer to stop
+        # =============================================
+        logger.debug("calling testcaseEnv.lock.acquire()", extra=d)
+        testcaseEnv.lock.acquire()
+        testcaseEnv.userDefinedEnvVarDict["stopBackgroundProducer"] = True
+        logger.debug("calling testcaseEnv.lock.release()", extra=d)
+        testcaseEnv.lock.release()
+
+        # =============================================
+        # wait for producer thread's update of
+        # "backgroundProducerStopped" to be "True"
+        # =============================================
+        while 1:
+            logger.debug("calling testcaseEnv.lock.acquire()", extra=d)
+            testcaseEnv.lock.acquire()
+            logger.info("status of backgroundProducerStopped : [" + \
+                str(testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"]) + "]", extra=d)
+            if testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"]:
+                logger.debug("calling testcaseEnv.lock.release()", extra=d)
+                testcaseEnv.lock.release()
+                logger.info("all producer threads completed", extra=d)
+                break
+            logger.debug("calling testcaseEnv.lock.release()", extra=d)
+            testcaseEnv.lock.release()
+
+        testcaseEnv.producerHostParentPidDict.clear()
 
     for hostname, consumerPPid in testcaseEnv.consumerHostParentPidDict.items():
         consumerEntityId = system_test_utils.get_data_by_lookup_keyval(entityConfigs, "hostname", hostname, "entity_id")
@@ -1495,6 +1674,9 @@ def stop_all_remote_running_processes(systemTestEnv, testcaseEnv):
 
     for entityId, mirrorMakerParentPid in testcaseEnv.entityMirrorMakerParentPidDict.items():
         stop_remote_entity(systemTestEnv, entityId, mirrorMakerParentPid)
+
+    for entityId, consumerParentPid in testcaseEnv.entityConsoleConsumerParentPidDict.items():
+        stop_remote_entity(systemTestEnv, entityId, consumerParentPid)
 
     for entityId, brokerParentPid in testcaseEnv.entityBrokerParentPidDict.items():
         stop_remote_entity(systemTestEnv, entityId, brokerParentPid)
@@ -1514,8 +1696,8 @@ def start_migration_tool(systemTestEnv, testcaseEnv, onlyThisEntityId=None):
         if onlyThisEntityId is None or entityId == onlyThisEntityId:
 
             host              = migrationToolConfig["hostname"]
-            jmxPort           = migrationToolConfig["jmx_port"] 
-            role              = migrationToolConfig["role"] 
+            jmxPort           = migrationToolConfig["jmx_port"]
+            role              = migrationToolConfig["role"]
             kafkaHome         = system_test_utils.get_data_by_lookup_keyval(clusterConfigList, "entity_id", entityId, "kafka_home")
             javaHome          = system_test_utils.get_data_by_lookup_keyval(clusterConfigList, "entity_id", entityId, "java_home")
             jmxPort           = system_test_utils.get_data_by_lookup_keyval(clusterConfigList, "entity_id", entityId, "jmx_port")
@@ -1581,7 +1763,7 @@ def validate_07_08_migrated_data_matched(systemTestEnv, testcaseEnv):
         producerEntityId = prodPerfCfg["entity_id"]
         topic = system_test_utils.get_data_by_lookup_keyval(testcaseEnv.testcaseConfigsList, "entity_id", producerEntityId, "topic")
 
-        consumerEntityIdList = system_test_utils.get_data_from_list_of_dicts( 
+        consumerEntityIdList = system_test_utils.get_data_from_list_of_dicts(
                                clusterEntityConfigDictList, "role", "console_consumer", "entity_id")
 
         matchingConsumerEntityId = None
@@ -1595,7 +1777,7 @@ def validate_07_08_migrated_data_matched(systemTestEnv, testcaseEnv):
         if matchingConsumerEntityId is None:
             break
 
-        msgChecksumMissingInConsumerLogPathName = get_testcase_config_log_dir_pathname( 
+        msgChecksumMissingInConsumerLogPathName = get_testcase_config_log_dir_pathname(
                                                   testcaseEnv, "console_consumer", matchingConsumerEntityId, "default") \
                                                   + "/msg_checksum_missing_in_consumer.log"
         producerLogPath     = get_testcase_config_log_dir_pathname(testcaseEnv, "producer_performance", producerEntityId, "default")
@@ -1680,7 +1862,7 @@ def validate_broker_log_segment_checksum(systemTestEnv, testcaseEnv, clusterName
         #        |- 00000000000000000020.log
         #        |- . . .
 
-        # loop through all topicPartition directories such as : test_1-0, test_1-1, ... 
+        # loop through all topicPartition directories such as : test_1-0, test_1-1, ...
         for topicPartition in os.listdir(localLogSegmentPath):
             # found a topic-partition directory
             if os.path.isdir(localLogSegmentPath + "/" + topicPartition):
@@ -1733,7 +1915,7 @@ def validate_broker_log_segment_checksum(systemTestEnv, testcaseEnv, clusterName
     #   'test_2-0' : ['d41d8cd98f00b204e9800998ecf8427e','d41d8cd98f00b204e9800998ecf8427e'],
     #   'test_2-1' : ['d41d8cd98f00b204e9800998ecf8427e','d41d8cd98f00b204e9800998ecf8427e']
     # }
-  
+
     for brokerTopicPartitionKey, md5Checksum in brokerLogCksumDict.items():
         tokens = brokerTopicPartitionKey.split(":")
         brokerKey      = tokens[0]
@@ -1759,7 +1941,7 @@ def validate_broker_log_segment_checksum(systemTestEnv, testcaseEnv, clusterName
             logger.debug("merged log segment checksum in " + topicPartition + " matched", extra=d)
         else:
             logger.error("unexpected error in " + topicPartition, extra=d)
-            
+
     if failureCount == 0:
         validationStatusDict["Validate for merged log segment checksum in cluster [" + clusterName + "]"] = "PASSED"
     else:
@@ -1772,8 +1954,8 @@ def start_simple_consumer(systemTestEnv, testcaseEnv, minStartingOffsetDict=None
     for consumerConfig in consumerConfigList:
         host              = consumerConfig["hostname"]
         entityId          = consumerConfig["entity_id"]
-        jmxPort           = consumerConfig["jmx_port"] 
-        clusterName       = consumerConfig["cluster_name"] 
+        jmxPort           = consumerConfig["jmx_port"]
+        clusterName       = consumerConfig["cluster_name"]
         kafkaHome         = system_test_utils.get_data_by_lookup_keyval(clusterList, "entity_id", entityId, "kafka_home")
         javaHome          = system_test_utils.get_data_by_lookup_keyval(clusterList, "entity_id", entityId, "java_home")
         kafkaRunClassBin  = kafkaHome + "/bin/kafka-run-class.sh"
@@ -1837,16 +2019,16 @@ def start_simple_consumer(systemTestEnv, testcaseEnv, minStartingOffsetDict=None
                            "--no-wait-at-logend ",
                            " > " + outputFilePathName,
                            " & echo pid:$! > " + consumerLogPath + "/entity_" + entityId + "_pid'"]
-    
+
                 cmdStr = " ".join(cmdList)
-    
+
                 logger.debug("executing command: [" + cmdStr + "]", extra=d)
                 subproc_1 = system_test_utils.sys_call_return_subproc(cmdStr)
                 # dummy for-loop to wait until the process is completed
                 for line in subproc_1.stdout.readlines():
-                    pass 
+                    pass
                 time.sleep(1)
-   
+
                 partitionId += 1
             replicaIndex += 1
 
@@ -1855,7 +2037,7 @@ def get_controller_attributes(systemTestEnv, testcaseEnv):
     logger.info("Querying Zookeeper for Controller info ...", extra=d)
 
     # keep track of controller data in this dict such as broker id & entity id
-    controllerDict = {} 
+    controllerDict = {}
 
     clusterConfigsList = systemTestEnv.clusterEntityConfigDictList
     tcConfigsList      = testcaseEnv.testcaseConfigsList
@@ -1910,7 +2092,7 @@ def getMinCommonStartingOffset(systemTestEnv, testcaseEnv, clusterName="source")
         logPathName              = get_testcase_config_log_dir_pathname(testcaseEnv, "broker", brokerEntityId, "default")
         localLogSegmentPath      = logPathName + "/" + remoteLogSegmentDir
 
-        # loop through all topicPartition directories such as : test_1-0, test_1-1, ... 
+        # loop through all topicPartition directories such as : test_1-0, test_1-1, ...
         for topicPartition in sorted(os.listdir(localLogSegmentPath)):
             # found a topic-partition directory
             if os.path.isdir(localLogSegmentPath + "/" + topicPartition):
@@ -1949,7 +2131,7 @@ def getMinCommonStartingOffset(systemTestEnv, testcaseEnv, clusterName="source")
     #  u'3:test_2-0': '0',
     #  u'3:test_2-1': '0'}
 
-    # loop through brokerLogStartOffsetDict to get the min common starting offset for each topic-partition    
+    # loop through brokerLogStartOffsetDict to get the min common starting offset for each topic-partition
     for brokerTopicPartition in sorted(brokerLogStartOffsetDict.iterkeys()):
         topicPartition = brokerTopicPartition.split(':')[1]
 
@@ -2076,7 +2258,6 @@ def validate_data_matched_in_multi_topics_from_single_consumer_producer(systemTe
     clusterEntityConfigDictList = systemTestEnv.clusterEntityConfigDictList
 
     prodPerfCfgList = system_test_utils.get_dict_from_list_of_dicts(clusterEntityConfigDictList, "role", "producer_performance")
-    consumerCfgList = system_test_utils.get_dict_from_list_of_dicts(clusterEntityConfigDictList, "role", "console_consumer")
 
     for prodPerfCfg in prodPerfCfgList:
         producerEntityId = prodPerfCfg["entity_id"]
@@ -2104,7 +2285,7 @@ def validate_data_matched_in_multi_topics_from_single_consumer_producer(systemTe
         topicList = topicStr.split(',')
         for topic in topicList:
             consumerDuplicateCount = 0
-            msgIdMissingInConsumerLogPathName = get_testcase_config_log_dir_pathname( 
+            msgIdMissingInConsumerLogPathName = get_testcase_config_log_dir_pathname(
                                                 testcaseEnv, "console_consumer", matchingConsumerEntityId, "default") \
                                                 + "/msg_id_missing_in_consumer_" + topic + ".log"
             producerMsgIdList  = get_message_id(producerLogPathName, topic)
@@ -2120,8 +2301,11 @@ def validate_data_matched_in_multi_topics_from_single_consumer_producer(systemTe
                 outfile.write(id + "\n")
             outfile.close()
 
+            logger.info("Producer entity id " + producerEntityId, extra=d)
+            logger.info("Consumer entity id " + matchingConsumerEntityId, extra=d)
             logger.info("no. of unique messages on topic [" + topic + "] sent from publisher  : " + str(len(producerMsgIdSet)), extra=d)
             logger.info("no. of unique messages on topic [" + topic + "] received by consumer : " + str(len(consumerMsgIdSet)), extra=d)
+            logger.info("no. of duplicate messages on topic [" + topic + "] received by consumer: " + str(consumerDuplicateCount), extra=d)
             validationStatusDict["Unique messages from producer on [" + topic + "]"] = str(len(producerMsgIdSet))
             validationStatusDict["Unique messages from consumer on [" + topic + "]"] = str(len(consumerMsgIdSet))
 
@@ -2220,12 +2404,49 @@ def validate_index_log(systemTestEnv, testcaseEnv, clusterName="source"):
     else:
         validationStatusDict["Validate index log in cluster [" + clusterName + "]"] = "FAILED"
 
+def get_leader_for(systemTestEnv, testcaseEnv, topic, partition):
+    logger.info("Querying Zookeeper for leader info for topic " + topic, extra=d)
+    clusterConfigsList = systemTestEnv.clusterEntityConfigDictList
+    tcConfigsList      = testcaseEnv.testcaseConfigsList
+
+    zkDictList         = system_test_utils.get_dict_from_list_of_dicts(clusterConfigsList, "role", "zookeeper")
+    firstZkDict        = zkDictList[0]
+    hostname           = firstZkDict["hostname"]
+    zkEntityId         = firstZkDict["entity_id"]
+    clientPort         = system_test_utils.get_data_by_lookup_keyval(tcConfigsList, "entity_id", zkEntityId, "clientPort")
+    kafkaHome          = system_test_utils.get_data_by_lookup_keyval(clusterConfigsList, "entity_id", zkEntityId, "kafka_home")
+    javaHome           = system_test_utils.get_data_by_lookup_keyval(clusterConfigsList, "entity_id", zkEntityId, "java_home")
+    kafkaRunClassBin   = kafkaHome + "/bin/kafka-run-class.sh"
+
+    zkQueryStr = "get /brokers/topics/" + topic + "/partitions/" + str(partition) + "/state"
+    brokerid   = ''
+    leaderEntityId = ''
+
+    cmdStrList = ["ssh " + hostname,
+                  "\"JAVA_HOME=" + javaHome,
+                  kafkaRunClassBin + " org.apache.zookeeper.ZooKeeperMain",
+                  "-server " + testcaseEnv.userDefinedEnvVarDict["sourceZkConnectStr"],
+                  zkQueryStr + " 2> /dev/null | tail -1\""]
+    cmdStr = " ".join(cmdStrList)
+    logger.info("executing command [" + cmdStr + "]", extra=d)
+    subproc = system_test_utils.sys_call_return_subproc(cmdStr)
+    for line in subproc.stdout.readlines():
+        if "\"leader\"" in line:
+            line = line.rstrip('\n')
+            json_data = json.loads(line)
+            for key,val in json_data.items():
+                if key == 'leader':
+                    brokerid = str(val)
+            leaderEntityId = system_test_utils.get_data_by_lookup_keyval(tcConfigsList, "broker.id", brokerid, "entity_id")
+            break
+    return leaderEntityId
+
 def get_leader_attributes(systemTestEnv, testcaseEnv):
 
     logger.info("Querying Zookeeper for leader info ...", extra=d)
 
     # keep track of leader data in this dict such as broker id & entity id
-    leaderDict = {} 
+    leaderDict = {}
 
     clusterConfigsList = systemTestEnv.clusterEntityConfigDictList
     tcConfigsList      = testcaseEnv.testcaseConfigsList
@@ -2251,11 +2472,10 @@ def get_leader_attributes(systemTestEnv, testcaseEnv):
                   "-server " + testcaseEnv.userDefinedEnvVarDict["sourceZkConnectStr"],
                   zkQueryStr + " 2> /dev/null | tail -1\""]
     cmdStr = " ".join(cmdStrList)
-    logger.debug("executing command [" + cmdStr + "]", extra=d)
+    logger.info("executing command [" + cmdStr + "]", extra=d)
 
     subproc = system_test_utils.sys_call_return_subproc(cmdStr)
     for line in subproc.stdout.readlines():
-        logger.debug("zk returned : " + line, extra=d)
         if "\"leader\"" in line:
             line = line.rstrip('\n')
             json_data = json.loads(line)
@@ -2275,5 +2495,12 @@ def get_leader_attributes(systemTestEnv, testcaseEnv):
     print leaderDict
     return leaderDict
 
-
+def write_consumer_properties(consumerProperties):
+    import tempfile
+    props_file_path = tempfile.gettempdir() + "/consumer.properties"
+    consumer_props_file=open(props_file_path,"w")
+    for key,value in consumerProperties.iteritems():
+        consumer_props_file.write(key+"="+value+"\n")
+    consumer_props_file.close()
+    return props_file_path
 

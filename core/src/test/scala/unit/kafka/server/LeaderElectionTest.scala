@@ -19,7 +19,6 @@ package kafka.server
 
 import org.scalatest.junit.JUnit3Suite
 import kafka.zk.ZooKeeperTestHarness
-import kafka.admin.AdminUtils
 import kafka.utils.TestUtils._
 import junit.framework.Assert._
 import kafka.utils.{ZkUtils, Utils, TestUtils}
@@ -35,8 +34,8 @@ class LeaderElectionTest extends JUnit3Suite with ZooKeeperTestHarness {
   val port1 = TestUtils.choosePort()
   val port2 = TestUtils.choosePort()
 
-  val configProps1 = TestUtils.createBrokerConfig(brokerId1, port1)
-  val configProps2 = TestUtils.createBrokerConfig(brokerId2, port2)
+  val configProps1 = TestUtils.createBrokerConfig(brokerId1, port1, false)
+  val configProps2 = TestUtils.createBrokerConfig(brokerId2, port2, false)
   var servers: Seq[KafkaServer] = Seq.empty[KafkaServer]
 
   var staleControllerEpochDetected = false
@@ -61,10 +60,8 @@ class LeaderElectionTest extends JUnit3Suite with ZooKeeperTestHarness {
     val partitionId = 0
 
     // create topic with 1 partition, 2 replicas, one on each broker
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0 -> Seq(0, 1)))
+    val leader1 = createTopic(zkClient, topic, partitionReplicaAssignment = Map(0 -> Seq(0, 1)), servers = servers)(0)
 
-    // wait until leader is elected
-    val leader1 = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
     val leaderEpoch1 = ZkUtils.getEpochForPartition(zkClient, topic, partitionId)
     debug("leader Epoc: " + leaderEpoch1)
     debug("Leader is elected to be: %s".format(leader1.getOrElse(-1)))
@@ -76,8 +73,8 @@ class LeaderElectionTest extends JUnit3Suite with ZooKeeperTestHarness {
     // kill the server hosting the preferred replica
     servers.last.shutdown()
     // check if leader moves to the other server
-    val leader2 = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 1500,
-      if(leader1.get == 0) None else leader1)
+    val leader2 = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId,
+                                                    oldLeaderOpt = if(leader1.get == 0) None else leader1)
     val leaderEpoch2 = ZkUtils.getEpochForPartition(zkClient, topic, partitionId)
     debug("Leader is elected to be: %s".format(leader1.getOrElse(-1)))
     debug("leader Epoc: " + leaderEpoch2)
@@ -90,8 +87,8 @@ class LeaderElectionTest extends JUnit3Suite with ZooKeeperTestHarness {
     servers.last.startup()
     servers.head.shutdown()
     Thread.sleep(zookeeper.tickTime)
-    val leader3 = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 1500,
-      if(leader2.get == 1) None else leader2)
+    val leader3 = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId,
+                                                    oldLeaderOpt = if(leader2.get == 1) None else leader2)
     val leaderEpoch3 = ZkUtils.getEpochForPartition(zkClient, topic, partitionId)
     debug("leader Epoc: " + leaderEpoch3)
     debug("Leader is elected to be: %s".format(leader3.getOrElse(-1)))
@@ -108,10 +105,8 @@ class LeaderElectionTest extends JUnit3Suite with ZooKeeperTestHarness {
     val partitionId = 0
 
     // create topic with 1 partition, 2 replicas, one on each broker
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0 -> Seq(0, 1)))
+    val leader1 = createTopic(zkClient, topic, partitionReplicaAssignment = Map(0 -> Seq(0, 1)), servers = servers)(0)
 
-    // wait until leader is elected
-    val leader1 = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
     val leaderEpoch1 = ZkUtils.getEpochForPartition(zkClient, topic, partitionId)
     debug("leader Epoc: " + leaderEpoch1)
     debug("Leader is elected to be: %s".format(leader1.getOrElse(-1)))
@@ -137,7 +132,8 @@ class LeaderElectionTest extends JUnit3Suite with ZooKeeperTestHarness {
                                                       staleControllerEpoch, 0, "")
 
     controllerChannelManager.sendRequest(brokerId2, leaderAndIsrRequest, staleControllerEpochCallback)
-    TestUtils.waitUntilTrue(() => staleControllerEpochDetected == true, 1000)
+    TestUtils.waitUntilTrue(() => staleControllerEpochDetected == true,
+                            "Controller epoch should be stale")
     assertTrue("Stale controller epoch not detected by the broker", staleControllerEpochDetected)
 
     controllerChannelManager.shutdown()

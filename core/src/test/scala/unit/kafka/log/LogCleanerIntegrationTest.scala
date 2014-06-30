@@ -92,7 +92,7 @@ class LogCleanerIntegrationTest extends JUnitSuite {
   def makeCleaner(parts: Int, 
                   minDirtyMessages: Int = 0, 
                   numThreads: Int = 1,
-                  defaultPolicy: String = "dedupe",
+                  defaultPolicy: String = "compact",
                   policyOverrides: Map[String, String] = Map()): LogCleaner = {
     
     // create partitions and add them to the pool
@@ -101,7 +101,7 @@ class LogCleanerIntegrationTest extends JUnitSuite {
       val dir = new File(logDir, "log-" + i)
       dir.mkdirs()
       val log = new Log(dir = dir,
-                        LogConfig(segmentSize = segmentSize, maxIndexSize = 100*1024, fileDeleteDelayMs = deleteDelay, dedupe = true),
+                        LogConfig(segmentSize = segmentSize, maxIndexSize = 100*1024, fileDeleteDelayMs = deleteDelay, compact = true),
                         recoveryPoint = 0L,
                         scheduler = time.scheduler,
                         time = time)

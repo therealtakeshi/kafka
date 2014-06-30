@@ -16,20 +16,22 @@
 */
 package kafka.server
 
-import org.scalatest.junit.JUnit3Suite
-import org.junit.Assert._
-import java.io.File
-import kafka.admin.AdminUtils
 import kafka.utils.TestUtils._
 import kafka.utils.IntEncoder
 import kafka.utils.{Utils, TestUtils}
 import kafka.zk.ZooKeeperTestHarness
 import kafka.common._
-import kafka.producer.{ProducerConfig, KeyedMessage, Producer}
+import kafka.producer.{KeyedMessage, Producer}
+import kafka.serializer.StringEncoder
+
+import java.io.File
+
+import org.scalatest.junit.JUnit3Suite
+import org.junit.Assert._
 
 class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
 
-  val configs = TestUtils.createBrokerConfigs(2).map(new KafkaConfig(_) {
+  val configs = TestUtils.createBrokerConfigs(2, false).map(new KafkaConfig(_) {
     override val replicaLagTimeMaxMs = 5000L
     override val replicaLagMaxMessages = 10L
     override val replicaFetchWaitMaxMs = 1000
@@ -50,12 +52,26 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
   var hwFile1: OffsetCheckpoint = new OffsetCheckpoint(new File(configProps1.logDirs(0), ReplicaManager.HighWatermarkFilename))
   var hwFile2: OffsetCheckpoint = new OffsetCheckpoint(new File(configProps2.logDirs(0), ReplicaManager.HighWatermarkFilename))
   var servers: Seq[KafkaServer] = Seq.empty[KafkaServer]
-  
-  val producerProps = getProducerConfig(TestUtils.getBrokerListStrFromConfigs(configs))
-  producerProps.put("key.serializer.class", classOf[IntEncoder].getName.toString)
-  producerProps.put("request.required.acks", "-1")
-  
+
+  override def setUp() {
+    super.setUp()
+
+    // start both servers
+    server1 = TestUtils.createServer(configProps1)
+    server2 = TestUtils.createServer(configProps2)
+    servers ++= List(server1, server2)
+
+    // create topic with 1 partition, 2 replicas, one on each broker
+    createTopic(zkClient, topic, partitionReplicaAssignment = Map(0->Seq(0,1)), servers = servers)
+
+    // create the producer
+    producer = TestUtils.createProducer[Int, String](TestUtils.getBrokerListStrFromConfigs(configs),
+      encoder = classOf[StringEncoder].getName,
+      keyEncoder = classOf[IntEncoder].getName)
+  }
+
   override def tearDown() {
+    producer.close()
     for(server <- servers) {
       server.shutdown()
       Utils.rm(server.config.logDirs(0))
@@ -64,32 +80,15 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
   }
 
   def testHWCheckpointNoFailuresSingleLogSegment {
-    // start both servers
-    server1 = TestUtils.createServer(configProps1)
-    server2 = TestUtils.createServer(configProps2)
-    servers ++= List(server1, server2)
-
-    producer = new Producer[Int, String](new ProducerConfig(producerProps))
-
-    // create topic with 1 partition, 2 replicas, one on each broker
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0->Seq(0,1)))
-
-    // wait until leader is elected
-    var leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
-    assertTrue("Leader should get elected", leader.isDefined)
-    // NOTE: this is to avoid transient test failures
-    assertTrue("Leader could be broker 0 or broker 1", (leader.getOrElse(-1) == 0) || (leader.getOrElse(-1) == 1))
-
     val numMessages = 2L
     sendMessages(numMessages.toInt)
 
     // give some time for the follower 1 to record leader HW
-    assertTrue("Failed to update highwatermark for follower after 1000 ms", 
-               TestUtils.waitUntilTrue(() =>
-                 server2.replicaManager.getReplica(topic, 0).get.highWatermark == numMessages, 10000))
+    TestUtils.waitUntilTrue(() =>
+      server2.replicaManager.getReplica(topic, 0).get.highWatermark == numMessages,
+      "Failed to update high watermark for follower after timeout")
 
     servers.foreach(server => server.replicaManager.checkpointHighWatermarks())
-    producer.close()
     val leaderHW = hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L)
     assertEquals(numMessages, leaderHW)
     val followerHW = hwFile2.read.getOrElse(TopicAndPartition(topic, 0), 0L)
@@ -97,22 +96,8 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
   }
 
   def testHWCheckpointWithFailuresSingleLogSegment {
-    // start both servers
-    server1 = TestUtils.createServer(configProps1)
-    server2 = TestUtils.createServer(configProps2)
-    servers ++= List(server1, server2)
+    var leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId)
 
-    producer = new Producer[Int, String](new ProducerConfig(producerProps))
-
-    // create topic with 1 partition, 2 replicas, one on each broker
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0->Seq(0,1)))
-
-    // wait until leader is elected
-    var leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
-    assertTrue("Leader should get elected", leader.isDefined)
-    // NOTE: this is to avoid transient test failures
-    assertTrue("Leader could be broker 0 or broker 1", (leader.getOrElse(-1) == 0) || (leader.getOrElse(-1) == 1))
-    
     assertEquals(0L, hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L))
 
     sendMessages(1)
@@ -124,13 +109,13 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
     assertEquals(hw, hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L))
 
     // check if leader moves to the other server
-    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500, leader)
+    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, oldLeaderOpt = leader)
     assertEquals("Leader must move to broker 1", 1, leader.getOrElse(-1))
 
     // bring the preferred replica back
     server1.startup()
 
-    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
+    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId)
     assertTrue("Leader must remain on broker 1, in case of zookeeper session expiration it can move to broker 0",
       leader.isDefined && (leader.get == 0 || leader.get == 1))
 
@@ -140,50 +125,32 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
     assertEquals(hw, hwFile2.read.getOrElse(TopicAndPartition(topic, 0), 0L))
 
     server2.startup()
-    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500, leader)
+    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, oldLeaderOpt = leader)
     assertTrue("Leader must remain on broker 0, in case of zookeeper session expiration it can move to broker 1",
       leader.isDefined && (leader.get == 0 || leader.get == 1))
 
     sendMessages(1)
     hw += 1
-      
+
     // give some time for follower 1 to record leader HW of 60
-    assertTrue("Failed to update highwatermark for follower after 1000 ms", TestUtils.waitUntilTrue(() =>
-      server2.replicaManager.getReplica(topic, 0).get.highWatermark == hw, 2000))
+    TestUtils.waitUntilTrue(() =>
+      server2.replicaManager.getReplica(topic, 0).get.highWatermark == hw,
+      "Failed to update high watermark for follower after timeout")
     // shutdown the servers to allow the hw to be checkpointed
     servers.foreach(server => server.shutdown())
-    producer.close()
     assertEquals(hw, hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L))
     assertEquals(hw, hwFile2.read.getOrElse(TopicAndPartition(topic, 0), 0L))
   }
 
   def testHWCheckpointNoFailuresMultipleLogSegments {
-    // start both servers
-    server1 = TestUtils.createServer(configs.head)
-    server2 = TestUtils.createServer(configs.last)
-    servers ++= List(server1, server2)
-
-    hwFile1 = new OffsetCheckpoint(new File(server1.config.logDirs(0), ReplicaManager.HighWatermarkFilename))
-    hwFile2 = new OffsetCheckpoint(new File(server2.config.logDirs(0), ReplicaManager.HighWatermarkFilename))
-
-    producer = new Producer[Int, String](new ProducerConfig(producerProps))
-
-    // create topic with 1 partition, 2 replicas, one on each broker
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0->Seq(0,1)))
-
-    // wait until leader is elected
-    var leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
-    assertTrue("Leader should get elected", leader.isDefined)
-    // NOTE: this is to avoid transient test failures
-    assertTrue("Leader could be broker 0 or broker 1", (leader.getOrElse(-1) == 0) || (leader.getOrElse(-1) == 1))
     sendMessages(20)
-    var hw = 20L
+    val hw = 20L
     // give some time for follower 1 to record leader HW of 600
-    assertTrue("Failed to update highwatermark for follower after 1000 ms", TestUtils.waitUntilTrue(() =>
-      server2.replicaManager.getReplica(topic, 0).get.highWatermark == hw, 1000))
+    TestUtils.waitUntilTrue(() =>
+      server2.replicaManager.getReplica(topic, 0).get.highWatermark == hw,
+      "Failed to update high watermark for follower after timeout")
     // shutdown the servers to allow the hw to be checkpointed
     servers.foreach(server => server.shutdown())
-    producer.close()
     val leaderHW = hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L)
     assertEquals(hw, leaderHW)
     val followerHW = hwFile2.read.getOrElse(TopicAndPartition(topic, 0), 0L)
@@ -191,31 +158,15 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
   }
 
   def testHWCheckpointWithFailuresMultipleLogSegments {
-    // start both servers
-    server1 = TestUtils.createServer(configs.head)
-    server2 = TestUtils.createServer(configs.last)
-    servers ++= List(server1, server2)
-
-    hwFile1 = new OffsetCheckpoint(new File(server1.config.logDirs(0), ReplicaManager.HighWatermarkFilename))
-    hwFile2 = new OffsetCheckpoint(new File(server2.config.logDirs(0), ReplicaManager.HighWatermarkFilename))
-
-    producer = new Producer[Int, String](new ProducerConfig(producerProps))
-
-    // create topic with 1 partition, 2 replicas, one on each broker
-    AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkClient, topic, Map(0->Seq(server1.config.brokerId, server2.config.brokerId)))
-
-    // wait until leader is elected
-    var leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500)
-    assertTrue("Leader should get elected", leader.isDefined)
-    // NOTE: this is to avoid transient test failures
-    assertTrue("Leader could be broker 0 or broker 1", (leader.getOrElse(-1) == 0) || (leader.getOrElse(-1) == 1))
+    var leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId)
 
     sendMessages(2)
     var hw = 2L
-    
+
     // allow some time for the follower to get the leader HW
-    assertTrue("Failed to update highwatermark for follower after 1000 ms", TestUtils.waitUntilTrue(() =>
-      server2.replicaManager.getReplica(topic, 0).get.highWatermark == hw, 1000))
+    TestUtils.waitUntilTrue(() =>
+      server2.replicaManager.getReplica(topic, 0).get.highWatermark == hw,
+      "Failed to update high watermark for follower after timeout")
     // kill the server hosting the preferred replica
     server1.shutdown()
     server2.shutdown()
@@ -224,7 +175,7 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
 
     server2.startup()
     // check if leader moves to the other server
-    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, 500, leader)
+    leader = waitUntilLeaderIsElectedOrChanged(zkClient, topic, partitionId, oldLeaderOpt = leader)
     assertEquals("Leader must move to broker 1", 1, leader.getOrElse(-1))
 
     assertEquals(hw, hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L))
@@ -237,13 +188,13 @@ class LogRecoveryTest extends JUnit3Suite with ZooKeeperTestHarness {
 
     sendMessages(2)
     hw += 2
-    
+
     // allow some time for the follower to get the leader HW
-    assertTrue("Failed to update highwatermark for follower after 1000 ms", TestUtils.waitUntilTrue(() =>
-      server1.replicaManager.getReplica(topic, 0).get.highWatermark == hw, 1000))
+    TestUtils.waitUntilTrue(() =>
+      server1.replicaManager.getReplica(topic, 0).get.highWatermark == hw,
+      "Failed to update high watermark for follower after timeout")
     // shutdown the servers to allow the hw to be checkpointed
     servers.foreach(server => server.shutdown())
-    producer.close()
     assertEquals(hw, hwFile1.read.getOrElse(TopicAndPartition(topic, 0), 0L))
     assertEquals(hw, hwFile2.read.getOrElse(TopicAndPartition(topic, 0), 0L))
   }

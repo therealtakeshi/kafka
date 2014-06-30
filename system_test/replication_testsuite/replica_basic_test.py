@@ -188,7 +188,7 @@ class ReplicaBasicTest(ReplicationUtils, SetupUtils):
 
                 if autoCreateTopic.lower() == "false":
                     self.log_message("creating topics")
-                    kafka_system_test_utils.create_topic(self.systemTestEnv, self.testcaseEnv)
+                    kafka_system_test_utils.create_topic_for_producer_performance(self.systemTestEnv, self.testcaseEnv)
                     self.anonLogger.info("sleeping for 5s")
                     time.sleep(5)
 
@@ -363,6 +363,7 @@ class ReplicaBasicTest(ReplicationUtils, SetupUtils):
                         str(self.testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"]) + "]", extra=self.d)
                     if self.testcaseEnv.userDefinedEnvVarDict["backgroundProducerStopped"]:
                         time.sleep(1)
+                        self.testcaseEnv.lock.release()
                         self.logger.info("all producer threads completed", extra=self.d)
                         break
                     time.sleep(1)

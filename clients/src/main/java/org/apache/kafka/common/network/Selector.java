@@ -25,8 +25,20 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.metrics.Measurable;
+import org.apache.kafka.common.metrics.MetricConfig;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.metrics.stats.Avg;
+import org.apache.kafka.common.metrics.stats.Count;
+import org.apache.kafka.common.metrics.stats.Max;
+import org.apache.kafka.common.metrics.stats.Rate;
+import org.apache.kafka.common.utils.Time;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A selector interface for doing non-blocking multi-connection network I/O.
@@ -58,27 +70,33 @@ import org.apache.kafka.common.KafkaException;
  */
 public class Selector implements Selectable {
 
+    private static final Logger log = LoggerFactory.getLogger(Selector.class);
+
     private final java.nio.channels.Selector selector;
     private final Map<Integer, SelectionKey> keys;
     private final List<NetworkSend> completedSends;
     private final List<NetworkReceive> completedReceives;
     private final List<Integer> disconnected;
     private final List<Integer> connected;
+    private final Time time;
+    private final SelectorMetrics sensors;
 
     /**
      * Create a new selector
      */
-    public Selector() {
+    public Selector(Metrics metrics, Time time) {
         try {
             this.selector = java.nio.channels.Selector.open();
         } catch (IOException e) {
             throw new KafkaException(e);
         }
+        this.time = time;
         this.keys = new HashMap<Integer, SelectionKey>();
         this.completedSends = new ArrayList<NetworkSend>();
         this.completedReceives = new ArrayList<NetworkReceive>();
         this.connected = new ArrayList<Integer>();
         this.disconnected = new ArrayList<Integer>();
+        this.sensors = new SelectorMetrics(metrics);
     }
 
     /**
@@ -92,10 +110,13 @@ public class Selector implements Selectable {
      * @param sendBufferSize The send buffer for the new connection
      * @param receiveBufferSize The receive buffer for the new connection
      * @throws IllegalStateException if there is already a connection for that id
-     * @throws UnresolvedAddressException if DNS resolution fails on the hostname
+     * @throws IOException if DNS resolution fails on the hostname or if the broker is down
      */
     @Override
     public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException {
+        if (this.keys.containsKey(id))
+            throw new IllegalStateException("There is already a connection for id " + id);
+
         SocketChannel channel = SocketChannel.open();
         channel.configureBlocking(false);
         Socket socket = channel.socket();
@@ -107,12 +128,13 @@ public class Selector implements Selectable {
             channel.connect(address);
         } catch (UnresolvedAddressException e) {
             channel.close();
+            throw new IOException("Can't resolve address: " + address, e);
+        } catch (IOException e) {
+            channel.close();
             throw e;
         }
         SelectionKey key = channel.register(this.selector, SelectionKey.OP_CONNECT);
         key.attach(new Transmissions(id));
-        if (this.keys.containsKey(key))
-            throw new IllegalStateException("There is already a connection for id " + id);
         this.keys.put(id, key);
     }
 
@@ -140,17 +162,12 @@ public class Selector implements Selectable {
      */
     @Override
     public void close() {
-        for (SelectionKey key : this.selector.keys()) {
-            try {
-                close(key);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
+        for (SelectionKey key : this.selector.keys())
+            close(key);
         try {
             this.selector.close();
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("Exception closing selector:", e);
         }
     }
 
@@ -190,7 +207,11 @@ public class Selector implements Selectable {
         }
 
         /* check ready keys */
+        long startSelect = time.nanoseconds();
         int readyKeys = select(timeout);
+        long endSelect = time.nanoseconds();
+        this.sensors.selectTime.record(endSelect - startSelect, time.milliseconds());
+
         if (readyKeys > 0) {
             Set<SelectionKey> keys = this.selector.selectedKeys();
             Iterator<SelectionKey> iter = keys.iterator();
@@ -200,14 +221,17 @@ public class Selector implements Selectable {
 
                 Transmissions transmissions = transmissions(key);
                 SocketChannel channel = channel(key);
+
+                // register all per-broker metrics at once
+                sensors.maybeRegisterNodeMetrics(transmissions.id);
+
                 try {
-                    /*
-                     * complete any connections that have finished their handshake
-                     */
+                    /* complete any connections that have finished their handshake */
                     if (key.isConnectable()) {
                         channel.finishConnect();
                         key.interestOps(key.interestOps() & ~SelectionKey.OP_CONNECT | SelectionKey.OP_READ);
                         this.connected.add(transmissions.id);
+                        this.sensors.connectionCreated.record();
                     }
 
                     /* read from any connections that have readable data */
@@ -218,17 +242,17 @@ public class Selector implements Selectable {
                         if (transmissions.receive.complete()) {
                             transmissions.receive.payload().rewind();
                             this.completedReceives.add(transmissions.receive);
+                            this.sensors.recordBytesReceived(transmissions.id, transmissions.receive.payload().limit());
                             transmissions.clearReceive();
                         }
                     }
 
-                    /*
-                     * write to any sockets that have space in their buffer and for which we have data
-                     */
+                    /* write to any sockets that have space in their buffer and for which we have data */
                     if (key.isWritable()) {
                         transmissions.send.writeTo(channel);
                         if (transmissions.send.remaining() <= 0) {
                             this.completedSends.add(transmissions.send);
+                            this.sensors.recordBytesSent(transmissions.id, transmissions.send.size());
                             transmissions.clearSend();
                             key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
                         }
@@ -238,11 +262,13 @@ public class Selector implements Selectable {
                     if (!key.isValid())
                         close(key);
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.error("Error in I/O: ", e);
                     close(key);
                 }
             }
         }
+        long endIo = time.nanoseconds();
+        this.sensors.ioTime.record(endIo - endSelect, time.milliseconds());
     }
 
     @Override
@@ -294,7 +320,7 @@ public class Selector implements Selectable {
     /**
      * Begin closing this connection
      */
-    private void close(SelectionKey key) throws IOException {
+    private void close(SelectionKey key) {
         SocketChannel channel = channel(key);
         Transmissions trans = transmissions(key);
         if (trans != null) {
@@ -305,8 +331,13 @@ public class Selector implements Selectable {
         }
         key.attach(null);
         key.cancel();
-        channel.socket().close();
-        channel.close();
+        try {
+            channel.socket().close();
+            channel.close();
+        } catch (IOException e) {
+            log.error("Exception closing connection to node {}:", trans.id, e);
+        }
+        this.sensors.connectionClosed.record();
     }
 
     /**
@@ -359,6 +390,113 @@ public class Selector implements Selectable {
 
         public void clearReceive() {
             this.receive = null;
+        }
+    }
+
+    private class SelectorMetrics {
+        private final Metrics metrics;
+        public final Sensor connectionClosed;
+        public final Sensor connectionCreated;
+        public final Sensor bytesTransferred;
+        public final Sensor bytesSent;
+        public final Sensor bytesReceived;
+        public final Sensor selectTime;
+        public final Sensor ioTime;
+
+        public SelectorMetrics(Metrics metrics) {
+            this.metrics = metrics;
+
+            this.connectionClosed = this.metrics.sensor("connections-closed");
+            this.connectionClosed.add("connection-close-rate", "Connections closed per second in the window.", new Rate());
+
+            this.connectionCreated = this.metrics.sensor("connections-created");
+            this.connectionCreated.add("connection-creation-rate", "New connections established per second in the window.", new Rate());
+
+            this.bytesTransferred = this.metrics.sensor("bytes-sent-received");
+            bytesTransferred.add("network-io-rate",
+                                 "The average number of network operations (reads or writes) on all connections per second.",
+                                 new Rate(new Count()));
+
+            this.bytesSent = this.metrics.sensor("bytes-sent", bytesTransferred);
+            this.bytesSent.add("outgoing-byte-rate", "The average number of outgoing bytes sent per second to all servers.", new Rate());
+            this.bytesSent.add("request-rate", "The average number of requests sent per second.", new Rate(new Count()));
+            this.bytesSent.add("request-size-avg", "The average size of all requests in the window..", new Avg());
+            this.bytesSent.add("request-size-max", "The maximum size of any request sent in the window.", new Max());
+
+            this.bytesReceived = this.metrics.sensor("bytes-received", bytesTransferred);
+            this.bytesReceived.add("incoming-byte-rate", "Bytes/second read off all sockets", new Rate());
+            this.bytesReceived.add("response-rate", "Responses received sent per second.", new Rate(new Count()));
+
+            this.selectTime = this.metrics.sensor("select-time");
+            this.selectTime.add("select-rate",
+                                "Number of times the I/O layer checked for new I/O to perform per second",
+                                new Rate(new Count()));
+            this.selectTime.add("io-wait-time-ns-avg",
+                                "The average length of time the I/O thread spent waiting for a socket ready for reads or writes in nanoseconds.",
+                                new Avg());
+            this.selectTime.add("io-wait-ratio", "The fraction of time the I/O thread spent waiting.", new Rate(TimeUnit.NANOSECONDS));
+
+            this.ioTime = this.metrics.sensor("io-time");
+            this.ioTime.add("io-time-ns-avg", "The average length of time for I/O per select call in nanoseconds.", new Avg());
+            this.ioTime.add("io-ratio", "The fraction of time the I/O thread spent doing I/O", new Rate(TimeUnit.NANOSECONDS));
+
+            this.metrics.addMetric("connection-count", "The current number of active connections.", new Measurable() {
+                public double measure(MetricConfig config, long now) {
+                    return keys.size();
+                }
+            });
+        }
+
+        public void maybeRegisterNodeMetrics(int node) {
+            if (node >= 0) {
+                // if one sensor of the metrics has been registered for the node,
+                // then all other sensors should have been registered; and vice versa
+                String nodeRequestName = "node-" + node + ".bytes-sent";
+                Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
+                if (nodeRequest == null) {
+                    nodeRequest = this.metrics.sensor(nodeRequestName);
+                    nodeRequest.add("node-" + node + ".outgoing-byte-rate", new Rate());
+                    nodeRequest.add("node-" + node + ".request-rate",
+                                    "The average number of requests sent per second.",
+                                    new Rate(new Count()));
+                    nodeRequest.add("node-" + node + ".request-size-avg", "The average size of all requests in the window..", new Avg());
+                    nodeRequest.add("node-" + node + ".request-size-max", "The maximum size of any request sent in the window.", new Max());
+
+                    String nodeResponseName = "node-" + node + ".bytes-received";
+                    Sensor nodeResponse = this.metrics.sensor(nodeResponseName);
+                    nodeResponse.add("node-" + node + ".incoming-byte-rate", new Rate());
+                    nodeResponse.add("node-" + node + ".response-rate",
+                                     "The average number of responses received per second.",
+                                     new Rate(new Count()));
+
+                    String nodeTimeName = "node-" + node + ".latency";
+                    Sensor nodeRequestTime = this.metrics.sensor(nodeTimeName);
+                    nodeRequestTime.add("node-" + node + ".request-latency-avg", new Avg());
+                    nodeRequestTime.add("node-" + node + ".request-latency-max", new Max());
+                }
+            }
+        }
+
+        public void recordBytesSent(int node, int bytes) {
+            long now = time.milliseconds();
+            this.bytesSent.record(bytes, now);
+            if (node >= 0) {
+                String nodeRequestName = "node-" + node + ".bytes-sent";
+                Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
+                if (nodeRequest != null)
+                    nodeRequest.record(bytes, now);
+            }
+        }
+
+        public void recordBytesReceived(int node, int bytes) {
+            long now = time.milliseconds();
+            this.bytesReceived.record(bytes, now);
+            if (node >= 0) {
+                String nodeRequestName = "node-" + node + ".bytes-received";
+                Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
+                if (nodeRequest != null)
+                    nodeRequest.record(bytes, now);
+            }
         }
     }
 

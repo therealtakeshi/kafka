@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package kafka.api.test
+package kafka.api
 
 import org.scalatest.junit.JUnit3Suite
 import org.junit.Test
@@ -26,7 +26,7 @@ import java.lang.Integer
 import java.util.concurrent.{TimeoutException, TimeUnit, ExecutionException}
 
 import kafka.server.{KafkaConfig, KafkaServer}
-import kafka.utils.{Utils, TestUtils}
+import kafka.utils.{ShutdownableThread, Utils, TestUtils}
 import kafka.zk.ZooKeeperTestHarness
 import kafka.consumer.SimpleConsumer
 
@@ -50,8 +50,8 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
   private var producer3: KafkaProducer = null
   private var producer4: KafkaProducer = null
 
-  private val props1 = TestUtils.createBrokerConfig(brokerId1, port1)
-  private val props2 = TestUtils.createBrokerConfig(brokerId2, port2)
+  private val props1 = TestUtils.createBrokerConfig(brokerId1, port1, false)
+  private val props2 = TestUtils.createBrokerConfig(brokerId2, port2, false)
   props1.put("auto.create.topics.enable", "false")
   props2.put("auto.create.topics.enable", "false")
   private val config1 = new KafkaConfig(props1)
@@ -63,18 +63,6 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
   private val topic1 = "topic-1"
   private val topic2 = "topic-2"
 
-  // TODO: move this function to TestUtils after we have server dependant on clients
-  private def makeProducer(brokerList: String, acks: Int, metadataFetchTimeout: Long,
-                           blockOnBufferFull: Boolean, bufferSize: Long) : KafkaProducer = {
-    val producerProps = new Properties()
-    producerProps.put(ProducerConfig.BROKER_LIST_CONFIG, brokerList)
-    producerProps.put(ProducerConfig.REQUIRED_ACKS_CONFIG, acks.toString)
-    producerProps.put(ProducerConfig.METADATA_FETCH_TIMEOUT_CONFIG, metadataFetchTimeout.toString)
-    producerProps.put(ProducerConfig.BLOCK_ON_BUFFER_FULL_CONFIG, blockOnBufferFull.toString)
-    producerProps.put(ProducerConfig.TOTAL_BUFFER_MEMORY_CONFIG, bufferSize.toString)
-    return new KafkaProducer(producerProps)
-  }
-
   override def setUp() {
     super.setUp()
     server1 = TestUtils.createServer(config1)
@@ -85,16 +73,14 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
     consumer1 = new SimpleConsumer("localhost", port1, 100, 1024*1024, "")
     consumer2 = new SimpleConsumer("localhost", port2, 100, 1024*1024, "")
 
-    producer1 = makeProducer(brokerList, 0, 3000, false, bufferSize); // produce with ack=0
-    producer2 = makeProducer(brokerList, 1, 3000, false, bufferSize); // produce with ack=1
-    producer3 = makeProducer(brokerList, -1, 3000, false, bufferSize); // produce with ack=-1
-    producer4 = makeProducer("localhost:8686,localhost:4242", 1, 3000, false, bufferSize); // produce with incorrect broker list
+    producer1 = TestUtils.createNewProducer(brokerList, acks = 0, blockOnBufferFull = false, bufferSize = bufferSize);
+    producer2 = TestUtils.createNewProducer(brokerList, acks = 1, blockOnBufferFull = false, bufferSize = bufferSize)
+    producer3 = TestUtils.createNewProducer(brokerList, acks = -1, blockOnBufferFull = false, bufferSize = bufferSize)
+    // producer with incorrect broker list
+    producer4 = TestUtils.createNewProducer("localhost:8686,localhost:4242", acks = 1, blockOnBufferFull = false, bufferSize = bufferSize)
   }
 
   override def tearDown() {
-    server1.shutdown; Utils.rm(server1.config.logDirs)
-    server2.shutdown; Utils.rm(server2.config.logDirs)
-
     consumer1.close
     consumer2.close
 
@@ -102,6 +88,9 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
     if (producer2 != null) producer2.close
     if (producer3 != null) producer3.close
     if (producer4 != null) producer4.close
+
+    server1.shutdown; Utils.rm(server1.config.logDirs)
+    server2.shutdown; Utils.rm(server2.config.logDirs)
 
     super.tearDown()
   }
@@ -138,7 +127,7 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
    * With non-exist-topic the future metadata should return ExecutionException caused by TimeoutException
    */
   @Test
-  def testNonExistTopic() {
+  def testNonExistentTopic() {
     // send a record with non-exist topic
     val record = new ProducerRecord(topic2, null, "key".getBytes, "value".getBytes)
     intercept[ExecutionException] {
@@ -218,13 +207,13 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
 
     // create a record with incorrect partition id, send should fail
     val record = new ProducerRecord(topic1, new Integer(1), "key".getBytes, "value".getBytes)
-    intercept[KafkaException] {
+    intercept[IllegalArgumentException] {
       producer1.send(record)
     }
-    intercept[KafkaException] {
+    intercept[IllegalArgumentException] {
       producer2.send(record)
     }
-    intercept[KafkaException] {
+    intercept[IllegalArgumentException] {
       producer3.send(record)
     }
   }
@@ -244,15 +233,15 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
     producer2.send(record).get
     producer3.send(record).get
 
-    intercept[KafkaException] {
+    intercept[IllegalStateException] {
       producer1.close
       producer1.send(record)
     }
-    intercept[KafkaException] {
+    intercept[IllegalStateException] {
       producer2.close
       producer2.send(record)
     }
-    intercept[KafkaException] {
+    intercept[IllegalStateException] {
       producer3.close
       producer3.send(record)
     }
@@ -267,18 +256,81 @@ class ProducerFailureHandlingTest extends JUnit3Suite with ZooKeeperTestHarness 
   def testBrokerFailure() {
     // create topic
     val leaders = TestUtils.createTopic(zkClient, topic1, 1, 2, servers)
-    val leader = leaders(0)
-    assertTrue("Leader of partition 0 of the topic should exist", leader.isDefined)
+    val partition = 0
+    assertTrue("Leader of partition 0 of the topic should exist", leaders(partition).isDefined)
 
-    val record = new ProducerRecord(topic1, null, "key".getBytes, "value".getBytes)
-    assertEquals("Returned metadata should have offset 0", producer3.send(record).get.offset, 0L)
+    val scheduler = new ProducerScheduler()
+    scheduler.start
 
-    // shutdown broker
-    val serverToShutdown = if(leader.get == server1.config.brokerId) server1 else server2
-    serverToShutdown.shutdown()
-    serverToShutdown.awaitShutdown()
+    // rolling bounce brokers
+    for (i <- 0 until 2) {
+      server1.shutdown()
+      server1.awaitShutdown()
+      server1.startup
 
-    // send the message again, it should still succeed due-to retry
-    assertEquals("Returned metadata should have offset 1", producer3.send(record).get.offset, 1L)
+      Thread.sleep(2000)
+
+      server2.shutdown()
+      server2.awaitShutdown()
+      server2.startup
+
+      Thread.sleep(2000)
+
+      // Make sure the producer do not see any exception
+      // in returned metadata due to broker failures
+      assertTrue(scheduler.failed == false)
+
+      // Make sure the leader still exists after bouncing brokers
+      TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, topic1, partition)
+    }
+
+    scheduler.shutdown
+
+    // Make sure the producer do not see any exception
+    // when draining the left messages on shutdown
+    assertTrue(scheduler.failed == false)
+
+    // double check that the leader info has been propagated after consecutive bounces
+    val leader = TestUtils.waitUntilMetadataIsPropagated(servers, topic1, partition)
+
+    val fetchResponse = if(leader == server1.config.brokerId) {
+      consumer1.fetch(new FetchRequestBuilder().addFetch(topic1, partition, 0, Int.MaxValue).build()).messageSet(topic1, partition)
+    } else {
+      consumer2.fetch(new FetchRequestBuilder().addFetch(topic1, partition, 0, Int.MaxValue).build()).messageSet(topic1, partition)
+    }
+
+    val messages = fetchResponse.iterator.toList.map(_.message)
+    val uniqueMessages = messages.toSet
+    val uniqueMessageSize = uniqueMessages.size
+
+    assertEquals("Should have fetched " + scheduler.sent + " unique messages", scheduler.sent, uniqueMessageSize)
+  }
+
+  private class ProducerScheduler extends ShutdownableThread("daemon-producer", false)
+  {
+    val numRecords = 1000
+    var sent = 0
+    var failed = false
+
+    val producer = TestUtils.createNewProducer(brokerList, bufferSize = bufferSize, retries = 10)
+
+    override def doWork(): Unit = {
+      val responses =
+        for (i <- sent+1 to sent+numRecords)
+        yield producer.send(new ProducerRecord(topic1, null, null, i.toString.getBytes))
+      val futures = responses.toList
+
+      try {
+        futures.map(_.get)
+        sent += numRecords
+      } catch {
+        case e : Exception => failed = true
+      }
+    }
+
+    override def shutdown(){
+      super.shutdown()
+      producer.close
+    }
   }
 }

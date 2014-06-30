@@ -150,7 +150,9 @@ public class Struct {
     }
 
     /**
-     * Create a struct for the schema of a container type (struct or array)
+     * Create a struct for the schema of a container type (struct or array).
+     * Note that for array type, this method assumes that the type is an array of schema and creates a struct
+     * of that schema. Arrays of other types can't be instantiated with this method.
      * 
      * @param field The field to create an instance of
      * @return The struct
@@ -230,9 +232,20 @@ public class Struct {
         StringBuilder b = new StringBuilder();
         b.append('{');
         for (int i = 0; i < this.values.length; i++) {
-            b.append(this.schema.get(i).name);
+            Field f = this.schema.get(i);
+            b.append(f.name);
             b.append('=');
-            b.append(this.values[i]);
+            if (f.type() instanceof ArrayOf) {
+                Object[] arrayValue = (Object[]) this.values[i];
+                b.append('[');
+                for (int j = 0; j < arrayValue.length; j++) {
+                    b.append(arrayValue[j]);
+                    if (j < arrayValue.length - 1)
+                        b.append(',');
+                }
+                b.append(']');
+            } else
+                b.append(this.values[i]);
             if (i < this.values.length - 1)
                 b.append(',');
         }
